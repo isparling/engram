@@ -1,0 +1,9 @@
+{
+  "schema_version": 0,
+  "space_id": "fictional-space-a",
+  "knowledge_schema_version": "0",
+  "records_dir": "records",
+  "required_packs": [
+    { "id": "fictional-pack", "version": "0.1.0" }
+  ]
+}

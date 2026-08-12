@@ -1,0 +1,45 @@
+{
+  "name": "@isparling/engram-harness",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Engram knowledge harness — generic OMP extension for structured knowledge capture, with a federated pack interface for external repos.",
+  "exports": {
+    ".": {
+      "import": "./omp-extension.ts"
+    },
+    "./omp-extension": {
+      "import": "./omp-extension.ts"
+    },
+    "./types": {
+      "import": "./omp-extension.ts"
+    },
+    "./pack-types": {
+      "import": "./src/packTypes.ts"
+    },
+    "./knowledge-types": {
+      "import": "./src/knowledgeTypes.ts"
+    }
+  },
+  "files": [
+    "omp-extension.ts",
+    "src/packTypes.ts",
+    "src/knowledgeTypes.ts",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts && bun test ./ompExtension.check.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "mutation-check": "node --experimental-strip-types scripts/mutation-check.ts",
+    "pack:local": "npm pack"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+launcher_dir=${0%/*}
+case $launcher_dir in
+  "$0") launcher_dir=. ;;
+esac
+release_root=$(CDPATH= cd -- "$launcher_dir/.." && pwd -P)
+exec node "$release_root/harness/src/cli.ts" "$@"

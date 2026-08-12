@@ -1,0 +1,14 @@
+#!/usr/bin/env bun
+// npm links this file into node_modules/.bin. Resolve the real package root
+// (following the symlink) so the vendored src/ tree is always found, then
+// run the CLI entry with the caller's arguments.
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const realBin = realpathSync(fileURLToPath(import.meta.url));
+const pkgRoot = resolve(realBin, "..", "..");
+const entry = resolve(pkgRoot, "src", "cli.ts");
+
+process.argv = [process.argv[0], entry, ...process.argv.slice(2)];
+await import(entry);

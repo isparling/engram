@@ -1,0 +1,32 @@
+{
+  "name": "@isparling/engram-cli",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "The CLI binary backing the @isparling/engram-harness extension's knowledge submission, reconciliation, recall, and rendering pipeline.",
+  "bin": {
+    "engram": "./bin/engram"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "release/",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "bun run ./scripts/prepare.mjs"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "keywords": [
+    "knowledge",
+    "claude",
+    "extension",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0"
+}
