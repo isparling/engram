@@ -31,8 +31,10 @@ silently mix.
 
 ## Packages
 
-- `harness/` — TypeScript core library, CLI entry, and property-pinned
-  mutation checker (`@isparling/engram-harness`).
+- `harness/` — TypeScript core library and property-pinned mutation
+  checker, publishing host-neutral pack and knowledge contracts only
+  (`@isparling/engram-harness`).
+- `harness/cli/` — independent CLI (`@isparling/engram-cli`).
 - `harness/omp/` — Oh My Pi extension adapter (`@isparling/engram-omp`); see
   [harness/omp/README.md](harness/omp/README.md).
 - `release/` — standalone immutable-release manager and manifest parser.
