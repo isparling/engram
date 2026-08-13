@@ -1072,7 +1072,7 @@ export const mutations: Mutation[] = [
   },
   {
     id: "omp-extension-registers-engram-capture-tool",
-    property: "if the registerTool call in omp-extension.ts is disabled, the test's toolHandler assert at ompExtension.test.ts:130 fails",
+    property: "if the registerTool call in omp-extension.ts is disabled, the test's toolHandler assert at omp/ompExtension.check.ts:130 fails",
     file: "omp/omp-extension.ts",
     find: "api.registerTool({\n    name: \"engram_capture\",",
     replace: "if (false) api.registerTool({\n    name: \"engram_capture\",",
