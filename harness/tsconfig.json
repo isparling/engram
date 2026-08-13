@@ -9,9 +9,8 @@
     "moduleResolution": "nodenext",
     "target": "es2023",
     "types": ["node", "bun"],
-    "baseUrl": ".",
     "paths": {
-      "@isparling/engram-harness/knowledge-types": ["src/knowledgeTypes.ts"]
+      "@isparling/engram-harness/knowledge-types": ["./src/knowledgeTypes.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "omp/**/*.ts", "mutations.ts", "../release/**/*.ts"]
