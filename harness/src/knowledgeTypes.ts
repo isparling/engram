@@ -224,7 +224,8 @@ export type PackHelpers = {
 /**
  * Async, LLM-backed candidate extraction from raw session transcripts.
  *
- * Called from the omp extension at agent_end (with willContinue guard).
+ * Called by the host integration at a lifecycle-triggered capture point,
+ * once the host determines the session (or turn) is complete.
  * This is separate from the synchronous KnowledgePack interface used by
  * the transaction pipeline — extraction is non-deterministic and may use
  * LLM inference.

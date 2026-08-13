@@ -1,8 +1,9 @@
 # @isparling/engram-harness
 
 Host-neutral pack and knowledge contracts for the engram knowledge harness.
-This package is a types-only artifact: it ships no runtime code, no OMP
-adapter, and no pack implementation. It exists so an external pack and a
+This package is contract-only: it ships the shared TypeScript interfaces
+and enum-like values, but no core transaction runtime, no host adapter,
+and no pack implementation. It exists so an external pack and a
 host integration can agree on the same interface without depending on each
 other's source.
 
@@ -31,7 +32,7 @@ exists as `@isparling/engram-omp`; see
 
 The `KnowledgePack` / `PresentationPack` facet surface an external pack
 implements, plus the optional `KnowledgeExtractor` interface a pack adds
-when it is selected for `agent_end`-style capture. See
+when it is selected for lifecycle-triggered session capture. See
 [docs/pack-interface.md](https://github.com/isparling/engram/blob/main/harness/docs/pack-interface.md)
 for the full resolution and failure contract a space's binding relies on.
 
