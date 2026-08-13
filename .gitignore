@@ -10,3 +10,5 @@ harness/*.tgz
 harness/cli/*.tgz
 harness/cli/src/
 harness/cli/release/
+
+.worktrees/
