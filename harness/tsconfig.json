@@ -8,7 +8,11 @@
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "target": "es2023",
-    "types": ["node", "bun"]
+    "types": ["node", "bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@isparling/engram-harness/knowledge-types": ["src/knowledgeTypes.ts"]
+    }
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "mutations.ts", "omp-extension.ts", "ompExtension.check.ts", "../release/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "omp/**/*.ts", "mutations.ts", "../release/**/*.ts"]
 }

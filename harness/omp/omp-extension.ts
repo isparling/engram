@@ -1,5 +1,5 @@
 /**
- * OMP extension for engram knowledge capture.
+ * Oh My Pi extension for engram knowledge capture.
  *
  * Hooks into the agent lifecycle to extract structured knowledge candidates
  * from settled turns, and registers a voluntary `engram_capture` tool for
@@ -7,10 +7,11 @@
  *
  * ## Installation
  *
- * Point omp at this extension via `--extension` or settings:
+ * Install `@isparling/engram-omp` and point Oh My Pi at it via `--extension`
+ * or settings:
  *
  *   extensions:
- *     - /path/to/engram/harness/omp-extension.ts
+ *     - @isparling/engram-omp
  *
  * ## Configuration
  *
@@ -31,9 +32,10 @@
  *                         file → calls `engram knowledge submit` → direct
  *                         submission, no extraction
  *
- * The extension is deliberately thin: it normalizes omp events and shells
- * out to the engram CLI for all pack operations. This avoids import-resolution
- * issues between omp's extension runtime and engram's separate module layout.
+ * The extension is deliberately thin: it normalizes Oh My Pi events and
+ * shells out to the engram CLI for all pack operations. This avoids
+ * import-resolution issues between Oh My Pi's extension runtime and
+ * engram's separate module layout.
  *
  * @module
  */
@@ -42,7 +44,7 @@ import { chmod, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { HostSessionProvenance, TurnContext, TurnToolCall } from "./src/knowledgeTypes.ts";
+import type { HostSessionProvenance, TurnContext, TurnToolCall } from "@isparling/engram-harness/knowledge-types";
 
 // ---------------------------------------------------------------------------
 // ExtensionAPI types — mirrors the real omp type from
@@ -109,7 +111,7 @@ function toCliCandidate(input: object): Record<string, unknown> {
  * Resolve the engram CLI binary to shell out to.
  *
  * Priority: an explicit ENGRAM_CLI, then the sibling @isparling/engram-cli
- * package when it is installed alongside @isparling/engram-harness, then the
+ * package when it is installed alongside @isparling/engram-omp, then the
  * `engram` command on PATH.
  */
 function resolveCliPath(): string {

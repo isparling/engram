@@ -1,0 +1,17 @@
+{
+  "name": "@isparling/engram-omp",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Oh My Pi extension for Engram knowledge capture.",
+  "exports": {
+    ".": { "import": "./omp-extension.ts" },
+    "./types": { "import": "./omp-extension.ts" }
+  },
+  "files": ["omp-extension.ts", "README.md"],
+  "peerDependencies": {
+    "@isparling/engram-harness": "^0.1.0"
+  },
+  "publishConfig": { "access": "public" }
+}

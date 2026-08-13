@@ -6,7 +6,7 @@
  * Runs under `bun test` (not `node --test`) because the extension uses
  * Bun.spawn. The file name avoids Node's test discovery globs (`*.check.ts`
  * instead of `*.test.ts` or `*-test.ts`). Invoke with:
- *   cd harness && bun test ./ompExtension.check.ts
+ *   cd harness && bun test ./omp/ompExtension.check.ts
  */
 
 import { test, after } from "node:test";
@@ -19,16 +19,17 @@ import engramExtension, {
   type ExtensionAPI,
   type ExtensionContext,
 } from "./omp-extension.ts";
-import { registerSpace, selectSpace } from "./src/spaceRegistry.ts";
+import { registerSpace, selectSpace } from "../src/spaceRegistry.ts";
 import {
   createUninitializedEphemeralSpace,
   destroyEphemeralSpace,
   type EphemeralSpace,
-} from "./test/testSupport.ts";
+} from "../test/testSupport.ts";
 
-const SPACE_A_RECORDS_DIR = join(dirname(fileURLToPath(import.meta.url)), "test-fixtures", "space-a", "records");
-const CLI_PATH = join(dirname(fileURLToPath(import.meta.url)), "src", "cli.ts");
-const FIXTURE_PATH = join(dirname(fileURLToPath(import.meta.url)), "test", "packLoader.fixture.ts");
+const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const SPACE_A_RECORDS_DIR = join(HARNESS_ROOT, "test-fixtures", "space-a", "records");
+const CLI_PATH = join(HARNESS_ROOT, "src", "cli.ts");
+const FIXTURE_PATH = join(HARNESS_ROOT, "test", "packLoader.fixture.ts");
 
 const spacesToClean: EphemeralSpace[] = [];
 
