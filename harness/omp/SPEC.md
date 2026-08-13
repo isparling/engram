@@ -1,12 +1,13 @@
-# OMP Extension — Specification
+# @isparling/engram-omp — Specification
 
 ## Purpose
 
-The omp extension (`harness/omp-extension.ts`) is the bridge between an omp
-host session and the engram core. It is a core-only artifact: it carries no
-pack logic itself. All knowledge operations converge on the engram transaction
-pipeline through the engram CLI. The pack surface an external module may
-implement is defined in [harness/docs/pack-interface.md](docs/pack-interface.md).
+The Oh My Pi extension (`harness/omp/omp-extension.ts`, published as
+`@isparling/engram-omp`) is the bridge between an Oh My Pi host session and
+the engram core. It is a thin adapter: it carries no pack logic itself. All
+knowledge operations converge on the engram transaction pipeline through the
+engram CLI. The pack surface an external module may implement is defined in
+[harness/docs/pack-interface.md](https://github.com/isparling/engram/blob/main/harness/docs/pack-interface.md).
 
 ## Factory
 
@@ -33,14 +34,14 @@ The extension registers two tools and one lifecycle hook:
 
 ## Reason
 
-The extension stays thin by design. It normalizes omp events and shells out
-to the engram CLI for pack operations, avoiding import-resolution coupling
-between omp's extension runtime and the core's module layout.
+The extension stays thin by design. It normalizes Oh My Pi events and shells
+out to the engram CLI for pack operations, avoiding import-resolution
+coupling between Oh My Pi's extension runtime and the core's module layout.
 
 ## Out of scope
 
-- The extension does not configure, bundle, select, or fall back between packs.
-  The CLI resolves every pack from the active space binding's
+- The extension does not configure, bundle, select, or fall back between
+  packs. The CLI resolves every pack from the active space binding's
   `installed_packs[].from` entry.
 - View, audience, and delivery logic lives in the core transaction pipeline,
   not in the extension.

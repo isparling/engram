@@ -5,9 +5,11 @@ useful mechanics for capture, reconciliation, approval, retrieval, and
 audience-aware presentation, without coupling knowledge to a single host or
 domain.
 
-A host agent owns agent execution. This repository owns the durable core: a
-CLI (`@isparling/engram-cli`), an OMP extension
-(`@isparling/engram-harness`), and the standalone immutable-release manager.
+A host agent owns agent execution. This repository hosts three focused
+packages: the independent `@isparling/engram-cli`, the host-neutral
+`@isparling/engram-harness` pack and knowledge contracts, and the separate
+`@isparling/engram-omp` Oh My Pi adapter — plus the standalone
+immutable-release manager.
 
 ## Core boundaries
 
@@ -29,8 +31,10 @@ silently mix.
 
 ## Packages
 
-- `harness/` — TypeScript core library, CLI entry, OMP extension, and
-  property-pinned mutation checker.
+- `harness/` — TypeScript core library, CLI entry, and property-pinned
+  mutation checker (`@isparling/engram-harness`).
+- `harness/omp/` — Oh My Pi extension adapter (`@isparling/engram-omp`); see
+  [harness/omp/README.md](harness/omp/README.md).
 - `release/` — standalone immutable-release manager and manifest parser.
 - `bin/` — stable `engram` launcher.
 - [Release policy](RELEASES.md) — immutable releases, qualification, and

@@ -1,74 +1,53 @@
 # @isparling/engram-harness
 
-Generic OMP extension for structured knowledge capture. This package is a
-core-only artifact: it carries no pack logic. Packs are external modules a
-space's binding resolves through `installed_packs[].from`; the interface they
-implement is documented in
-[harness/docs/pack-interface.md](https://github.com/isparling/engram/blob/main/harness/docs/pack-interface.md).
-Load the extension runtime; it shells out to the `@isparling/engram-cli`
-binary for every pack operation.
+Host-neutral pack and knowledge contracts for the engram knowledge harness.
+This package is a types-only artifact: it ships no runtime code, no OMP
+adapter, and no pack implementation. It exists so an external pack and a
+host integration can agree on the same interface without depending on each
+other's source.
 
 ## Quick start
 
 ```sh
-npm install @isparling/engram-harness @isparling/engram-cli
+npm install @isparling/engram-harness
 ```
 
 ```ts
-// my-extension.ts
-import engramExtension, { type ExtensionAPI } from "@isparling/engram-harness/omp-extension";
-
-export default async function (api: ExtensionAPI) {
-  return engramExtension(api);
-}
+import type { KnowledgePack } from "@isparling/engram-harness/pack-types";
+import type { KnowledgeEnvelope } from "@isparling/engram-harness/knowledge-types";
 ```
 
-```sh
-omp --extension ./my-extension.ts
-```
+A host integration owns translating its own lifecycle events (hooks, tool
+calls, session boundaries) onto these contracts, and sends captured
+knowledge through the independently installed `engram` CLI
+(`@isparling/engram-cli`) rather than importing engram's internal
+transaction pipeline. For the Oh My Pi host, that translation already
+exists as `@isparling/engram-omp`; see
+[harness/omp/README.md](https://github.com/isparling/engram/blob/main/harness/omp/README.md).
 
-The extension resolves every pack through the active binding registry and
-delegates capture and submission entirely to the engram CLI.
+## Exports
 
-## API
+### `@isparling/engram-harness/pack-types`
 
-### `engramExtension(api)`
+The `KnowledgePack` / `PresentationPack` facet surface an external pack
+implements, plus the optional `KnowledgeExtractor` interface a pack adds
+when it is selected for `agent_end`-style capture. See
+[docs/pack-interface.md](https://github.com/isparling/engram/blob/main/harness/docs/pack-interface.md)
+for the full resolution and failure contract a space's binding relies on.
 
-Default export. Registers the `engram_status` and `engram_capture` tools and an
-`agent_end` hook against the supplied `api`, returning a promise that resolves
-once the extension is set up.
+### `@isparling/engram-harness/knowledge-types`
 
-- `api` — the OMP extension API surface (see `ExtensionAPI`).
+The knowledge envelope, record, and transaction types shared by every pack
+and host integration: `KnowledgeEnvelope`, `KnowledgeRecord`,
+`KnowledgeResult`, `HostSessionProvenance`, `TurnContext`, and related
+types.
 
-Pack implementations are external Node ESM modules selected by
-`installed_packs[].from` in the active local binding; see
-[`docs/pack-interface.md`](https://github.com/isparling/engram/blob/main/harness/docs/pack-interface.md).
+## Scope
 
-### `ExtensionAPI`
-
-```ts
-interface ExtensionAPI {
-  on(event: "agent_end", handler: (event, ctx) => void | Promise<void>): void;
-  registerTool(tool: ToolDefinition): void;
-  logger: { info(message: string): void; warn(message: string): void };
-}
-```
-
-### `engram_status` tool
-
-Reports the designated extraction pack (declared with `extract: true`) after
-an `agent_end` hook has resolved the session. It always reports `mode: "cli"`.
-
-### `engram_capture` tool
-
-Submits a structured knowledge observation from the current session through the
-binding-selected CLI transaction pipeline.
-
-## Configuration
-
-| Variable | Purpose |
-|----------|---------|
-| `ENGRAM_CLI` | Path to the engram CLI binary. Default: the `@isparling/engram-cli` package when installed, else `engram` on PATH. |
-| `ENGRAM_BINDING_REGISTRY` | Path to the binding registry. Required for knowledge capture; capture is disabled with a warning when unset. |
-
-The extension logs only CLI-boundary failures. It never loads an in-memory pack.
+This package does not install, configure, bundle, or select a pack — that
+is the binding's job (see
+[docs/pack-interface.md](https://github.com/isparling/engram/blob/main/harness/docs/pack-interface.md)).
+It does not run agent sessions, register tools, or shell out to the CLI
+itself; a separately published host adapter package (such as
+`@isparling/engram-omp`) does that, using these types to stay compatible
+with the core.
