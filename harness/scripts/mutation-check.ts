@@ -248,8 +248,8 @@ function runBunTestSuite(harnessDir: string, testNamePattern?: string): SuiteRes
   }
   const args =
     testNamePattern === undefined
-      ? ["test", "./ompExtension.check.ts"]
-      : ["test", "./ompExtension.check.ts", "--test-name-pattern=" + testNamePattern];
+      ? ["test", "./omp/ompExtension.check.ts"]
+      : ["test", "./omp/ompExtension.check.ts", "--test-name-pattern=" + testNamePattern];
   const result = spawnSync("bun", args, { cwd: harnessDir, encoding: "utf8", env });
   const output = result.stdout + "\n" + result.stderr;
   return {

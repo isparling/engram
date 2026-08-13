@@ -253,8 +253,8 @@ entries by the source file they pin.
 | `release-runtime-package-exact` | The packaged runtime metadata contains exactly the three approved keys, preventing development scripts or dependency metadata from crossing the artifact boundary. |
 | `release-clean-source-required` | Release candidate construction refuses every tracked or untracked source change before staging, so copied bytes remain attributable to the recorded commit. |
 
-## omp-extension.ts
-| `omp-extension-registers-engram-capture-tool` | if the registerTool call in omp-extension.ts is disabled, the test's toolHandler assert at ompExtension.test.ts:130 fails |
+## omp/omp-extension.ts
+| `omp-extension-registers-engram-capture-tool` | if the registerTool call for engram_capture in omp-extension.ts is disabled, the test's result.status assert at omp/ompExtension.check.ts:170 fails |
 
 ## Notes on individual entries
 
