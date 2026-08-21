@@ -1,10 +1,11 @@
 # @isparling/engram-cli
 
-The CLI binary backing the `@isparling/engram-harness` extension's knowledge
-submission pipeline. It resolves knowledge submissions, reconciliations,
-rollups, recall queries, and rendered outputs against a configured binding
-registry. The CLI is a core-only artifact: packs are external modules
-resolved through the binding's `installed_packs[].from` specifier (see
+The CLI binary backing Engram's knowledge submission pipeline for host
+integrations such as `@isparling/engram-omp`. It resolves knowledge submissions,
+reconciliations, rollups, recall queries, and rendered outputs against a
+configured binding registry. The CLI is a core-only artifact: packs are
+external modules resolved through the binding's `installed_packs[].from`
+specifier (see
 [harness/docs/pack-interface.md](https://github.com/isparling/engram/blob/main/harness/docs/pack-interface.md)).
 
 ## Usage
