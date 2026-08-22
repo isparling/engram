@@ -1,8 +1,7 @@
 /**
- * Extension test — exercises engramExtension against a fixture space with
- * the external-demo pack, verifying that the engram_capture tool handler
- * resolves the pack via the binding's `from` field and submits the candidate.
- *
+ * Extension test — verifies final-settle delegation to the binding-selected
+ * pack's optional captureFromTurn handler and preserves engram_capture tool
+ * submission through the CLI fallback surface.
  * Runs under `bun test` (not `node --test`) because the extension uses
  * Bun.spawn. The file name avoids Node's test discovery globs (`*.check.ts`
  * instead of `*.test.ts` or `*-test.ts`). Invoke with:
@@ -11,14 +10,16 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import engramExtension, {
-  type AgentEndEvent,
+  type SessionStopEvent,
   type ExtensionAPI,
   type ExtensionContext,
+  type ToolDefinition,
 } from "./omp-extension.ts";
+import { captureInvocations } from "../test/packLoader.fixture.ts";
 import { registerSpace, selectSpace } from "../src/spaceRegistry.ts";
 import {
   createUninitializedEphemeralSpace,
@@ -46,6 +47,7 @@ function assertLegacyInMemoryPackIsNotPublicApi(): void {
 void assertLegacyInMemoryPackIsNotPublicApi;
 
 test("ompExtension property: engram_capture tool resolves external pack via from rather than pack_unknown", async () => {
+  captureInvocations.length = 0;
   // Create a fixture space with the external-demo pack
   const space = await createUninitializedEphemeralSpace(SPACE_A_RECORDS_DIR, "omp-ext-from");
   spacesToClean.push(space);
@@ -101,8 +103,8 @@ test("ompExtension property: engram_capture tool resolves external pack via from
   if (!selected.ok) {
     assert.fail(`space selection failed: ${JSON.stringify(selected.errors)}`);
   }
-  let agentEndHandler: ((event: AgentEndEvent, ctx: ExtensionContext) => void | Promise<void>) | undefined;
-  let toolHandler: ((params: Record<string, unknown>) => Promise<Record<string, unknown>>) | undefined;
+  let sessionStopHandler: ((event: SessionStopEvent, ctx: ExtensionContext) => void | Promise<void>) | undefined;
+  let toolHandler: ToolDefinition["execute"] | undefined;
   const warnings: string[] = [];
 
   // The extension spawns [cliPath, "knowledge", "submit", ...]. A .ts file
@@ -125,38 +127,123 @@ test("ompExtension property: engram_capture tool resolves external pack via from
   try {
     const mockApi: ExtensionAPI = {
       on: (_event, handler) => {
-        agentEndHandler = handler;
+        sessionStopHandler = handler;
       },
       registerTool: (tool) => {
-        toolHandler = tool.handler;
+        toolHandler = tool.execute;
       },
       logger: { info: (_msg) => {}, warn: (message) => { warnings.push(message); } },
     };
 
     await engramExtension(mockApi);
 
-    assert.ok(agentEndHandler !== undefined, "agent_end handler was not registered");
+    assert.ok(sessionStopHandler !== undefined, "session_stop handler was not registered");
     assert.ok(toolHandler !== undefined, "engram_capture tool handler was not registered");
 
-    // Fire agent_end first to populate hostSessionId and resolve the
-    // extraction pack. This makes the tool handler's subsequent CLI
-    // spawn use the correct session and pack id.
-    await agentEndHandler(
+    // session_stop carries the persisted session identity and the accumulated
+    // transcript. Only the latest user turn is eligible for capture.
+    const sessionFile = join(sessionsDir, `2026-08-22T12-00-00-000Z_${sessionId}.jsonl`);
+    await sessionStopHandler(
       {
-        type: "agent_end",
-        messages: [{ role: "assistant", content: "nothing noteworthy" }],
-        willContinue: false,
-        sessionId,
-        turnIndex: 0,
-        timestamp: new Date().toISOString(),
+        type: "session_stop",
+        messages: [
+          { role: "user", id: "old-user", content: "old observation" },
+          { role: "assistant", content: "old response" },
+          { role: "user", id: "current-user", content: "current observation" },
+          { role: "assistant", content: "current response" },
+        ],
+        session_id: sessionId,
+        session_file: sessionFile,
+        turn_id: 0,
+        stop_hook_active: false,
+        signal: new AbortController().signal,
       },
-      { sessionId, cwd: space.root },
+      { cwd: space.root },
     );
 
     assert.equal(
       warnings.some((warning) => warning.includes("capture-from-turn")),
       false,
-      `agent_end capture failed: ${warnings.join("\n")}`,
+      `session_stop capture failed: ${warnings.join("\n")}`,
+    );
+    const canonicalRecordsRoot = await realpath(space.binding.recordsRoot);
+    assert.deepEqual(captureInvocations, [{
+      sessionId,
+      narrative: "User: current observation\nAssistant: current response",
+      spaceId,
+      recordsRoot: canonicalRecordsRoot,
+      hasWriteFile: true,
+      hasRefreshIndex: true,
+    }]);
+    await sessionStopHandler(
+      {
+        type: "session_stop",
+        messages: [{ role: "user", id: "current-user", content: "current observation" }],
+        session_id: sessionId,
+        session_file: sessionFile,
+        turn_id: 0,
+        stop_hook_active: true,
+        signal: new AbortController().signal,
+      },
+      { cwd: space.root },
+    );
+    const aborted = new AbortController();
+    aborted.abort();
+    await sessionStopHandler(
+      {
+        type: "session_stop",
+        messages: [{ role: "user", id: "aborted-user", content: "aborted observation" }],
+        session_id: sessionId,
+        session_file: sessionFile,
+        turn_id: 0,
+        stop_hook_active: false,
+        signal: aborted.signal,
+      },
+      { cwd: space.root },
+    );
+    assert.equal(captureInvocations.length, 1, "continued or aborted stops must not capture");
+    const continuedFirst = {
+      type: "session_stop" as const,
+      messages: [{ role: "user", id: "next-user", content: "continued-first observation" }],
+      session_id: sessionId,
+      session_file: sessionFile,
+      turn_id: 0,
+      stop_hook_active: true,
+      signal: new AbortController().signal,
+    };
+    await sessionStopHandler(continuedFirst, { cwd: space.root });
+    assert.equal(captureInvocations.length, 2, "first observed continuation pass must capture");
+    await sessionStopHandler(
+      { ...continuedFirst, stop_hook_active: false },
+      { cwd: space.root },
+    );
+    assert.equal(captureInvocations.length, 2, "the same turn must capture only once");
+
+    const outsideRecords = join(space.root, "outside-records");
+    await mkdir(outsideRecords);
+    await symlink(outsideRecords, join(space.binding.recordsRoot, "linked"), "dir");
+    await sessionStopHandler(
+      {
+        type: "session_stop",
+        messages: [{ role: "user", id: "linked-user", content: "linked-write" }],
+        session_id: sessionId,
+        session_file: sessionFile,
+        turn_id: 0,
+        stop_hook_active: false,
+        signal: new AbortController().signal,
+      },
+      { cwd: space.root },
+    );
+    assert.equal(captureInvocations.length, 3);
+    assert.equal(
+      warnings.some((warning) => warning.includes("escaped records root through a symlink")),
+      true,
+      `expected symlink refusal: ${warnings.join("\n")}`,
+    );
+    assert.equal(
+      warnings.some((warning) => warning.includes("capture-from-turn")),
+      false,
+      "pack handler failure must not fall back to CLI capture",
     );
 
     // Now invoke the tool handler — it should use the resolved session
@@ -167,7 +254,9 @@ test("ompExtension property: engram_capture tool resolves external pack via from
       topics: ["topic:external"],
     });
 
-    assert.equal(result.status, "submitted", `expected submitted, got ${JSON.stringify(result)}`);
+    assert.ok(result.content[0], "engram_capture returned no text content");
+    const payload = JSON.parse(result.content[0].text) as { status: string };
+    assert.equal(payload.status, "submitted", `expected submitted, got ${JSON.stringify(result)}`);
   } finally {
     process.env.ENGRAM_BINDING_REGISTRY = envBackup.ENGRAM_BINDING_REGISTRY;
     process.env.ENGRAM_HOST_SESSION_ID = envBackup.ENGRAM_HOST_SESSION_ID;

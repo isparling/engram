@@ -15,17 +15,21 @@ engram CLI. The pack surface an external module may implement is defined in
 export default async function engramExtension(api: ExtensionAPI): Promise<void>
 ```
 
-The extension imports no pack implementation. Every pack is resolved by the
-CLI from the active binding's `installed_packs[].from` entry; the extension
-never selects or invokes an in-memory pack object.
+The extension selects no pack itself. At the awaited final-settle boundary it
+uses the active space's binding-selected extraction pack. If that external
+module exports `captureFromTurn(turn, tools)`, the extension invokes it and
+supplies create-only records-root writes plus scoped qmd refresh mechanics.
+The pack owns all draft policy. Modules without the handler retain the generic
+`engram capture-from-turn` CLI fallback.
 
 ## Behavior
 
 The extension registers two tools and one lifecycle hook:
 
-- **`agent_end` hook** — builds a `TurnContext` from the settled turn and
-  sends it to `engram capture-from-turn`, so extracted knowledge reaches the
-  transaction pipeline.
+- **`session_stop` hook** — takes only the latest user turn from the
+  accumulated transcript, builds a `TurnContext`, and delegates capture to the
+  pack handler or CLI fallback. This hook is awaited by OMP before final
+  settlement.
 - **`engram_capture` tool** — the agent supplies a structured
   kind/statement/topics envelope, which is written to a temporary file and
   submitted via `engram knowledge submit`.
@@ -34,14 +38,15 @@ The extension registers two tools and one lifecycle hook:
 
 ## Reason
 
-The extension stays thin by design. It normalizes Oh My Pi events and shells
-out to the engram CLI for pack operations, avoiding import-resolution
-coupling between Oh My Pi's extension runtime and the core's module layout.
+The extension owns only host mechanics: settled-turn normalization,
+binding-declared module loading, records-root confinement, create-only writes,
+and scoped qmd refresh. Domain policy — including whether and how observations
+become drafts — lives in the pack. Core transaction, retrieval, and
+presentation behavior remains unchanged.
 
 ## Out of scope
 
 - The extension does not configure, bundle, select, or fall back between
-  packs. The CLI resolves every pack from the active space binding's
-  `installed_packs[].from` entry.
-- View, audience, and delivery logic lives in the core transaction pipeline,
-  not in the extension.
+  packs. The active space binding selects the extraction pack.
+- View, audience, delivery, and draft-promotion policy live outside the
+  extension.

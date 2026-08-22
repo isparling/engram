@@ -22,28 +22,28 @@
  *
  * ## Design
  *
- * Two capture paths, both converging on the engram transaction pipeline:
+ * Two capture paths:
  *
- *   Hook (agent_end):  receives raw turn transcript → builds TurnContext →
- *                      pipes to `engram capture-from-turn` → pack's
- *                      extractCandidates() → LLM extraction → submit
+ *   Hook (session_stop): receives the settled transcript's latest user turn →
+ *                        builds TurnContext → invokes the binding-selected
+ *                        pack's optional captureFromTurn(turn, tools). The
+ *                        pack owns draft policy; the extension confines writes
+ *                        to recordsRoot and refreshes scoped qmd. Packs without
+ *                        the handler fall back to `engram capture-from-turn`.
  *   Tool (engram_capture): agent provides structured kind/statement/topics →
- *                         builds KnowledgeEnvelopeInput → writes to temp
- *                         file → calls `engram knowledge submit` → direct
- *                         submission, no extraction
+ *                          builds KnowledgeEnvelopeInput → writes to temp
+ *                          file → calls `engram knowledge submit`.
  *
- * The extension is deliberately thin: it normalizes Oh My Pi events and
- * shells out to the engram CLI for all pack operations. This avoids
- * import-resolution issues between Oh My Pi's extension runtime and
- * engram's separate module layout.
+ * The extension owns only OMP lifecycle and host mechanics. Capture policy
+ * remains external-pack code; core transaction behavior stays unchanged.
  *
  * @module
  */
 
-import { chmod, mkdtemp, open, rm } from "node:fs/promises";
+import { chmod, mkdtemp, open, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { HostSessionProvenance, TurnContext, TurnToolCall } from "@isparling/engram-harness/knowledge-types";
 
 // ---------------------------------------------------------------------------
@@ -52,22 +52,23 @@ import type { HostSessionProvenance, TurnContext, TurnToolCall } from "@isparlin
 // ---------------------------------------------------------------------------
 
 export interface ExtensionAPI {
-  on(event: "agent_end", handler: (event: AgentEndEvent, ctx: ExtensionContext) => void | Promise<void>): void;
+  on(event: "session_stop", handler: (event: SessionStopEvent, ctx: ExtensionContext) => void | Promise<void>): void;
   registerTool(tool: ToolDefinition): void;
   logger: { info: (message: string) => void; warn: (message: string) => void };
 }
 
-export interface AgentEndEvent {
-  type: "agent_end";
+export interface SessionStopEvent {
+  type: "session_stop";
   messages: unknown[];
-  willContinue?: boolean;
-  sessionId?: string;
-  turnIndex?: number;
-  timestamp?: string;
+  session_id: string;
+  session_file: string;
+  turn_id: number;
+  last_assistant_message?: unknown;
+  stop_hook_active: boolean;
+  signal: AbortSignal;
 }
 
 export interface ExtensionContext {
-  sessionId: string;
   cwd: string;
 }
 
@@ -81,11 +82,85 @@ export interface ToolDefinition {
   parameters: unknown;
   execute: (params: Record<string, unknown>) => Promise<ToolResult>;
 }
+export type CaptureTools = {
+  recordsRoot: string;
+  spaceId: string;
+  writeFile(path: string, content: string): Promise<void>;
+  refreshIndex(): Promise<void>;
+};
 
+export type CaptureSummary = {
+  created: string[];
+  existing: string[];
+  invalid: Array<{ id: string; errors: string[] }>;
+};
+
+export type CaptureHandler = (
+  turn: TurnContext,
+  tools: CaptureTools,
+) => Promise<CaptureSummary>;
+export type CaptureResolution =
+  | { kind: "available"; handler: CaptureHandler }
+  | { kind: "absent" }
+  | { kind: "failed"; message: string };
+function stopTurnKey(event: SessionStopEvent): string {
+  for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+    const message = event.messages[index];
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      !Array.isArray(message) &&
+      (message as Record<string, unknown>).role === "user"
+    ) {
+      const record = message as Record<string, unknown>;
+      const content = JSON.stringify(record.content);
+      const identity = typeof record.id === "string"
+        ? record.id
+        : typeof record.timestamp === "string" || typeof record.timestamp === "number"
+          ? `${record.timestamp}:${content}`
+          : content;
+      return `${event.session_id}:${event.turn_id}:${identity}`;
+    }
+  }
+  return `${event.session_id}:${event.turn_id}:no-user-message`;
+}
+
+
+function packExport(module: Record<string, unknown>, id: string): unknown {
+  const camelId = id.replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+  const direct = module[id] ?? module[camelId] ?? module.default;
+  if (direct !== undefined) return direct;
+  const registry = module.packs ?? module.packRegistry;
+  return typeof registry === "object" && registry !== null && !Array.isArray(registry)
+    ? (registry as Record<string, unknown>)[id]
+    : undefined;
+}
 function toolText(value: unknown): ToolResult {
   return {
     content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
   };
+}
+async function nativePackageSpecifier(specifier: string): Promise<string> {
+  const parentUrl = pathToFileURL(fileURLToPath(import.meta.url)).href;
+  const proc = Bun.spawn([
+    "node",
+    "--experimental-import-meta-resolve",
+    "--input-type=module",
+    "-e",
+    "console.log(import.meta.resolve(process.argv[1], process.argv[2]))",
+    specifier,
+    parentUrl,
+  ], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const exitCode = await proc.exited;
+  const stdout = (await new Response(proc.stdout).text()).trim();
+  if (exitCode !== 0 || stdout === "") {
+    const stderr = await new Response(proc.stderr).text();
+    throw new Error(`native ESM resolution failed: ${stderr.slice(0, 500)}`);
+  }
+  return stdout;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,9 +221,9 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
   const bindingRegistryPath = registryPath;
 
 
-  // Session identifier — captured from the first agent_end event's ctx.
-  // Before that, CLI calls will use "pending" which won't resolve a space;
-  // the first agent_end event resolves it.
+  // Session identifier — captured from OMP's awaited session_stop payload.
+  // Before the first final settle, CLI tools use "pending" and status reports
+  // no resolved pack.
   let hostSessionId: string | undefined;
 
   /** Build env for CLI calls, including the session id resolveActiveSpace requires. */
@@ -160,13 +235,51 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
     };
   }
 
-  // Cached extraction pack id — resolved lazily once a real session id is known.
+  // Active-space state is session-bound. OMP keeps extension instances alive
+  // across session switches, so every new session must resolve independently.
   let extractionPackId = "work-pack";
   let extractionPackVersion = "0.1.0";
+  let extractionPackFrom: string | undefined;
   let extractionSpaceId = "current";
+  let extractionRecordsRoot = "";
+  let captureResolution: CaptureResolution | undefined;
   let resolvedPackId = false;
+  let lastCapturedTurnKey: string | undefined;
 
-  /** Resolve the extraction pack from the active space. Called once on first agent_end. */
+  function resetSessionResolution(): void {
+    extractionPackId = "work-pack";
+    extractionPackVersion = "0.1.0";
+    extractionPackFrom = undefined;
+    extractionSpaceId = "current";
+    extractionRecordsRoot = "";
+    captureResolution = undefined;
+    resolvedPackId = false;
+    lastCapturedTurnKey = undefined;
+  }
+
+  async function bindingPathForActiveSpace(): Promise<string> {
+    const registry = JSON.parse(await readFile(bindingRegistryPath, "utf8")) as {
+      spaces?: Array<{ space_id?: unknown; binding_path?: unknown }>;
+    };
+    const entry = registry.spaces?.find((space) => space.space_id === extractionSpaceId);
+    if (typeof entry?.binding_path !== "string") {
+      throw new Error(`registry omitted binding path for active space ${extractionSpaceId}`);
+    }
+    return entry.binding_path;
+  }
+
+  async function packModuleSpecifier(): Promise<string> {
+    if (extractionPackFrom === undefined) throw new Error("active extraction pack omitted from");
+    if (extractionPackFrom.startsWith("./") || extractionPackFrom.startsWith("../")) {
+      const bindingPath = await bindingPathForActiveSpace();
+      return pathToFileURL(resolve(dirname(bindingPath), extractionPackFrom)).href;
+    }
+    if (isAbsolute(extractionPackFrom)) return pathToFileURL(extractionPackFrom).href;
+    if (extractionPackFrom.startsWith("file:")) return extractionPackFrom;
+    return nativePackageSpecifier(extractionPackFrom);
+  }
+
+  /** Resolve the extraction pack from the active space after final settlement. */
   async function resolveExtractionPack(): Promise<void> {
     if (hostSessionId === undefined || resolvedPackId) return;
     try {
@@ -180,59 +293,156 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
       const stdout = await new Response(proc.stdout).text();
       const status = JSON.parse(stdout) as Record<string, unknown>;
       const activeSpaces = status.active_spaces as Record<string, Record<string, unknown>> | undefined;
-      if (activeSpaces === undefined) return;
-      const space = activeSpaces[hostSessionId];
+      const space = activeSpaces?.[hostSessionId];
       if (space === undefined) return;
       extractionSpaceId = String(space.space_id ?? "current");
+      extractionRecordsRoot = String(space.records_root ?? "");
       const packs = space.packs as Array<Record<string, unknown>> | undefined;
-      if (packs === undefined) return;
-      const extractPack = packs.find((p) => p.extract === true);
+      const extractPack = packs?.find((pack) => pack.extract === true);
       if (extractPack === undefined) return;
       extractionPackId = String(extractPack.id);
       extractionPackVersion = String(extractPack.version);
+      extractionPackFrom = typeof extractPack.from === "string" ? extractPack.from : undefined;
       resolvedPackId = true;
     } catch {
-      // Keep defaults
+      // Resolution failure remains unresolved and capture stops at the caller.
     }
+  }
+
+  async function resolveCaptureHandler(): Promise<CaptureResolution> {
+    if (captureResolution !== undefined) return captureResolution;
+    try {
+      const specifier = await packModuleSpecifier();
+      // Runtime-selected by the active binding; a static import cannot model
+      // an external pack declaration.
+      const module = await import(specifier) as Record<string, unknown>;
+      const selected = packExport(module, extractionPackId);
+      if (
+        typeof selected !== "object" ||
+        selected === null ||
+        Array.isArray(selected) ||
+        (selected as Record<string, unknown>).id !== extractionPackId ||
+        (selected as Record<string, unknown>).version !== extractionPackVersion ||
+        typeof (selected as Record<string, unknown>).extractCandidates !== "function"
+      ) {
+        captureResolution = { kind: "failed", message: "pack export identity or extractor surface does not match the active binding" };
+      } else if (typeof module.captureFromTurn === "function") {
+        captureResolution = { kind: "available", handler: module.captureFromTurn as CaptureHandler };
+      } else {
+        captureResolution = { kind: "absent" };
+      }
+    } catch (error) {
+      captureResolution = { kind: "failed", message: String(error) };
+    }
+    return captureResolution;
+  }
+
+  async function captureTools(signal: AbortSignal): Promise<CaptureTools> {
+    const recordsRoot = await realpath(extractionRecordsRoot);
+    return {
+      recordsRoot,
+      spaceId: extractionSpaceId,
+      writeFile: async (path, content) => {
+        signal.throwIfAborted();
+        const target = resolve(path);
+        if (target !== recordsRoot && !target.startsWith(recordsRoot + sep)) {
+          throw new Error(`capture handler write escaped records root: ${path}`);
+        }
+        const parent = await realpath(dirname(target));
+        if (parent !== recordsRoot && !parent.startsWith(recordsRoot + sep)) {
+          throw new Error(`capture handler write escaped records root through a symlink: ${path}`);
+        }
+        signal.throwIfAborted();
+        const handle = await open(join(parent, basename(target)), "wx");
+        try {
+          signal.throwIfAborted();
+          await handle.writeFile(content, "utf8");
+        } finally {
+          await handle.close();
+        }
+      },
+      refreshIndex: async () => {
+        signal.throwIfAborted();
+        const proc = Bun.spawn([cliPath, "space", "refresh"], {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: cliEnv(),
+          signal,
+        });
+        const exitCode = await proc.exited;
+        if (exitCode !== 0) {
+          const stdout = await new Response(proc.stdout).text();
+          const stderr = await new Response(proc.stderr).text();
+          throw new Error(`guarded space refresh failed (exit ${exitCode}): ${(stdout || stderr).slice(0, 500)}`);
+        }
+      },
+    };
   }
 
 
   // -----------------------------------------------------------------------
-  // Structural capture: agent_end hook
+  // Structural capture: awaited final-settle hook
   // -----------------------------------------------------------------------
-  api.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {
-    // Capture the real session id from the first event; resolves the
-    // extraction pack lazily now that we can query the right space.
-    hostSessionId = ctx.sessionId;
+  api.on("session_stop", async (event: SessionStopEvent, _ctx: ExtensionContext) => {
+    if (event.signal.aborted) return;
+    if (event.session_id === "") {
+      api.logger.warn("[engram] session_stop omitted a host session id");
+      return;
+    }
+    if (hostSessionId !== event.session_id) resetSessionResolution();
+    hostSessionId = event.session_id;
     await resolveExtractionPack();
-
-    // Guard: skip auto-retry/continuation settles
-    if (event.willContinue === true) return;
+    if (!resolvedPackId) {
+      api.logger.warn("[engram] session_stop could not resolve an active extraction pack");
+      return;
+    }
     if (!Array.isArray(event.messages) || event.messages.length === 0) return;
+    const turnKey = stopTurnKey(event);
+    if (lastCapturedTurnKey === turnKey) return;
 
     const turn = buildTurnContext(event);
     if (turn === undefined) return;
+    const resolution = await resolveCaptureHandler();
+    if (resolution.kind === "failed") {
+      api.logger.warn(`[engram] failed to load pack capture handler: ${resolution.message}`);
+      return;
+    }
+    if (resolution.kind === "available") {
+      try {
+        const summary = await resolution.handler(turn, await captureTools(event.signal));
+        if (event.signal.aborted) return;
+        api.logger.info(
+          `[engram] capture: ${summary.created.length} draft(s), ` +
+          `${summary.existing.length} existing, ${summary.invalid.length} invalid`,
+        );
+        lastCapturedTurnKey = turnKey;
+      } catch (error) {
+        if (!event.signal.aborted) api.logger.warn(`[engram] pack capture handler failed: ${String(error)}`);
+      }
+      return;
+    }
 
-
-    // CLI fallback path
+    // A successfully loaded pack without a handler retains the generic CLI path.
     try {
       const proc = Bun.spawn([cliPath, "capture-from-turn"], {
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
         env: cliEnv(),
+        signal: event.signal,
       });
       await proc.stdin.write(JSON.stringify(turn) + "\n");
       await proc.stdin.end();
 
       const exitCode = await proc.exited;
-      if (exitCode !== 0) {
+      if (exitCode === 0) lastCapturedTurnKey = turnKey;
+      if (exitCode !== 0 && !event.signal.aborted) {
         const stdout = await new Response(proc.stdout).text();
         const stderr = await new Response(proc.stderr).text();
         api.logger.warn(`[engram] capture-from-turn failed (exit ${exitCode}): ${(stdout || stderr).slice(0, 500)}`);
       }
-    } catch (err) {
-      api.logger.warn(`[engram] failed to invoke engram CLI: ${err}`);
+    } catch (error) {
+      if (!event.signal.aborted) api.logger.warn(`[engram] failed to invoke engram CLI: ${String(error)}`);
     }
   });
 
@@ -333,25 +543,36 @@ Parameters:
 // TurnContext builder
 // ---------------------------------------------------------------------------
 
-function buildTurnContext(event: AgentEndEvent): TurnContext | undefined {
-  const messages = event.messages;
-  if (!Array.isArray(messages) || messages.length === 0) return undefined;
+function buildTurnContext(event: SessionStopEvent): TurnContext | undefined {
+  const records = event.messages.filter(
+    (message): message is Record<string, unknown> =>
+      typeof message === "object" && message !== null && !Array.isArray(message),
+  );
+  if (records.length === 0) return undefined;
 
-  const session: HostSessionProvenance = {
-    id: String(event.sessionId ?? "unknown"),
-    host: "omp",
-  };
-
-  const turnIndex = typeof event.turnIndex === "number" ? event.turnIndex : 0;
-  const timestamp = event.timestamp ?? new Date().toISOString();
+  let firstCurrentMessage = 0;
+  for (let index = 0; index < records.length; index += 1) {
+    if (records[index]?.role === "user") firstCurrentMessage = index;
+  }
+  const messages = records.slice(firstCurrentMessage);
+  const session: HostSessionProvenance = { id: event.session_id, host: "omp" };
+  const lastAssistant = typeof event.last_assistant_message === "object" &&
+    event.last_assistant_message !== null &&
+    !Array.isArray(event.last_assistant_message)
+    ? event.last_assistant_message as Record<string, unknown>
+    : undefined;
+  const rawTimestamp = lastAssistant?.timestamp;
+  const timestamp = typeof rawTimestamp === "number"
+    ? new Date(rawTimestamp).toISOString()
+    : typeof rawTimestamp === "string"
+      ? rawTimestamp
+      : new Date().toISOString();
 
   const narrativeParts: string[] = [];
   const toolCalls: TurnToolCall[] = [];
-
-  for (const raw of messages as Array<Record<string, unknown>>) {
+  for (const raw of messages) {
     const role = String(raw.role ?? "");
     const content = extractTextContent(raw);
-
     if (role === "user") {
       narrativeParts.push(`User: ${content}`);
     } else if (role === "assistant") {
@@ -391,8 +612,8 @@ function buildTurnContext(event: AgentEndEvent): TurnContext | undefined {
 
   return {
     session,
-    turnIndex,
-    timestamp: String(timestamp ?? new Date().toISOString()),
+    turnIndex: records.length,
+    timestamp,
     narrative: narrativeParts.join("\n"),
     toolCalls,
   };

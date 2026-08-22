@@ -19,11 +19,16 @@ engram rollup approve --bullets <path> --expect <rollup-hash>
 engram space register --binding <path>
 engram space select <space-id>
 engram space status
+engram space refresh
 engram recall --query <text> --audience <id> [--source-class <class>]
 engram render --view <id> --audience <id> --delivery <id> --model <provider/model>
 ```
 
 Run `engram --help` for current command usage.
+
+`space refresh` runs the active space's qmd update through Engram's guarded
+boundary: scoped config/cache variables, normalized `PWD`, config validation,
+symlink checks, and registry freshness recording.
 
 ## Requirements
 

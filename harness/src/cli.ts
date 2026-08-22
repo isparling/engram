@@ -11,6 +11,7 @@
 //   engram space register --binding <path-to-local-binding.json>
 //   engram space select <space-id>
 //   engram space status
+//   engram space refresh
 //   engram recall --query <text> --audience <id>
 //   engram version
 //
@@ -42,7 +43,7 @@ import {
   type ActiveSpace,
 } from "./spaceRegistry.ts";
 import { submitCandidate, type SubmitOutcome } from "./submit.ts";
-import { REFRESH_NOT_ATTEMPTED } from "./qmdRunner.ts";
+import { refreshQmdCollection, REFRESH_NOT_ATTEMPTED } from "./qmdRunner.ts";
 import { guardedRetrieve } from "./guardedRetrieval.ts";
 import { renderPresentation } from "./presentation.ts";
 import type { KnowledgePack, KnowledgeExtractor, PresentationPack, TurnContext, TurnToolCall, PackHelpers } from "./knowledgeTypes.ts";
@@ -71,6 +72,7 @@ const USAGE = [
   "       engram space register --binding <path>",
   "       engram space select <space-id>",
   "       engram space status",
+  "       engram space refresh",
   "       engram recall --query <text> --audience <id> [--source-class <class>]",
   "       engram render --view <id> --audience <id> --delivery <id> --model <provider/model> [--query <text>]",
 ].join("\n");
@@ -161,6 +163,23 @@ async function runSpaceCommand(args: string[]): Promise<void> {
     const result = await inspectSpaceRegistry(registryPath());
     if (!result.ok) printInvalid(result.errors);
     printJson(result.value);
+    return;
+  }
+  if (subcommand === "refresh") {
+    if (rest.length !== 0) usageError("space refresh accepts no arguments");
+    const registry = registryPath();
+    const active = await resolveActiveSpace(process.env);
+    if (!active.ok) printInvalid(active.errors);
+    const refresh = await refreshQmdCollection(active.value);
+    const recorded = await recordQmdFreshness(registry, active.value.spaceId, refresh.state);
+    const output = {
+      schema_version: 0,
+      status: refresh.state === "fresh" ? "refreshed" : "index-stale",
+      refresh,
+      ...(recorded.ok ? {} : { status_warnings: recorded.errors }),
+    };
+    printJson(output);
+    if (refresh.state !== "fresh") process.exit(1);
     return;
   }
   usageError(`unknown space command: ${subcommand ?? "(none)"}`);

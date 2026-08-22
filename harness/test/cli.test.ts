@@ -148,6 +148,29 @@ test("CLI: an additive candidate commits end to end and prints a schema_version:
   assert.equal(statusParsed.active_spaces["cli-additive-session"]?.qmd_freshness, "fresh");
 });
 
+test("CLI: space refresh uses the guarded qmd boundary and records freshness", async () => {
+  const space = await createEphemeralSpace(SPACE_A_RECORDS_DIR, "cli-space-refresh");
+  spacesToClean.push(space);
+  const sessionId = "cli-space-refresh-session";
+  const registryPath = await prepareActiveSpace(space, "cli-space-refresh", sessionId);
+
+  const result = await runCli(["space", "refresh"], registryPath, sessionId);
+  assert.equal(result.code, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const parsed = JSON.parse(result.stdout) as {
+    status: string;
+    refresh: { count: number; state: string };
+  };
+  assert.equal(parsed.status, "refreshed");
+  assert.equal(parsed.refresh.count, 1);
+  assert.equal(parsed.refresh.state, "fresh");
+
+  const status = await runCli(["space", "status"], registryPath, sessionId);
+  const statusParsed = JSON.parse(status.stdout) as {
+    active_spaces: Record<string, { qmd_freshness: string }>;
+  };
+  assert.equal(statusParsed.active_spaces[sessionId]?.qmd_freshness, "fresh");
+});
+
 test("CLI: a non-additive candidate without --approve exits nonzero and writes nothing", async () => {
   const s = await createEphemeralSpace(SPACE_A_RECORDS_DIR, "cli-non-additive");
   spacesToClean.push(s);

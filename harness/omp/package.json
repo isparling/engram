@@ -9,6 +9,7 @@
     ".": { "import": "./omp-extension.ts" },
     "./types": { "import": "./omp-extension.ts" }
   },
+  "pi": { "extensions": ["./omp-extension.ts"] },
   "files": ["omp-extension.ts", "README.md"],
   "peerDependencies": {
     "@isparling/engram-harness": "^0.1.0"

@@ -65,15 +65,18 @@ omp --extension ./node_modules/@isparling/engram-omp/omp-extension.ts
 
 ## How the Extension Works
 
-### Turn-End Extraction
+### Settled-Turn Extraction
 
-When a turn completes, the extension:
+When a main-session turn settles, the extension:
 
-1. Reads the turn messages.
-2. Builds a turn context.
-3. Calls the engram CLI with `capture-from-turn`.
-4. The CLI resolves the active space's declared pack and extracts knowledge
-   from the turn, then submits it.
+1. Receives OMP's awaited `session_stop` event.
+2. Takes only the latest user turn from the accumulated message list.
+3. Builds a `TurnContext` with the persisted OMP session id.
+4. Loads the active binding's extraction pack.
+5. Calls the pack's optional `captureFromTurn(turn, tools)` handler with
+   create-only records-root writes and scoped qmd refresh mechanics.
+6. Falls back to `engram capture-from-turn` only when the pack exports no
+   handler.
 
 ### The `engram_capture` Tool
 

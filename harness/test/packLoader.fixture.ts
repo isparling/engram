@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type {
   KnowledgeExtractor,
   KnowledgePack,
@@ -67,6 +68,37 @@ export const externalDemo: KnowledgePack & PresentationPack & KnowledgeExtractor
     return [];
   },
 };
+export const captureInvocations: Array<{
+  sessionId: string;
+  narrative: string;
+  spaceId: string;
+  recordsRoot: string;
+  hasWriteFile: boolean;
+  hasRefreshIndex: boolean;
+}> = [];
+
+export async function captureFromTurn(
+  turn: TurnContext,
+  tools: {
+    spaceId: string;
+    recordsRoot: string;
+    writeFile(path: string, content: string): Promise<void>;
+    refreshIndex(): Promise<void>;
+  },
+): Promise<{ created: string[]; existing: string[]; invalid: [] }> {
+  captureInvocations.push({
+    narrative: turn.narrative,
+    sessionId: turn.session.id,
+    spaceId: tools.spaceId,
+    recordsRoot: tools.recordsRoot,
+    hasWriteFile: typeof tools.writeFile === "function",
+    hasRefreshIndex: typeof tools.refreshIndex === "function",
+  });
+  if (turn.narrative.includes("linked-write")) {
+    await tools.writeFile(join(tools.recordsRoot, "linked", "probe.md"), "probe");
+  }
+  return { created: ["fixture-draft"], existing: [], invalid: [] };
+}
 export const miskeyedExtractor: KnowledgeExtractor = {
   id: "declared-extractor-a",
   version: "0.1.0",
