@@ -71,11 +71,21 @@ export interface ExtensionContext {
   cwd: string;
 }
 
+export type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+};
+
 export interface ToolDefinition {
   name: string;
   description: string;
   parameters: unknown;
-  handler: (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  execute: (params: Record<string, unknown>) => Promise<ToolResult>;
+}
+
+function toolText(value: unknown): ToolResult {
+  return {
+    content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +243,7 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
     name: "engram_status",
     description: "Report the binding-selected pack identity and CLI mode.",
     parameters: { type: "object", properties: {} },
-    handler: async () => ({
+    execute: async () => toolText({
       pack_id: resolvedPackId ? extractionPackId : null,
       pack_version: resolvedPackId ? extractionPackVersion : null,
       mode: "cli",
@@ -265,7 +275,7 @@ Parameters:
       },
       required: ["kind", "statement"],
     },
-    handler: async (params: Record<string, unknown>) => {
+    execute: async (params: Record<string, unknown>) => {
       const id = `capture-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const envelope = {
         id,
@@ -308,10 +318,10 @@ Parameters:
         const exitCode = await proc.exited;
         const stdout = await new Response(proc.stdout).text();
         const stderr = await new Response(proc.stderr).text();
-        if (exitCode === 0) return { status: "submitted", detail: stdout, id };
-        return { status: "error", detail: (stdout || stderr).slice(0, 1000), id };
+        if (exitCode === 0) return toolText({ status: "submitted", detail: stdout, id });
+        return toolText({ status: "error", detail: (stdout || stderr).slice(0, 1000), id });
       } catch (error) {
-        return { status: "error", detail: String(error).slice(0, 1000), id };
+        return toolText({ status: "error", detail: String(error).slice(0, 1000), id });
       } finally {
         if (candidateDir !== undefined) await rm(candidateDir, { recursive: true, force: true });
       }
