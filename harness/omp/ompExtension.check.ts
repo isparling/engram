@@ -19,12 +19,17 @@ import engramExtension, {
   type SessionStopEvent,
   type ExtensionAPI,
   type ExtensionContext,
+  type OmpSpawn,
   type ToolDefinition,
 } from "./omp-extension.ts";
 import { registerSpace } from "../src/spaceRegistry.ts";
 import {
   captureInvocations,
+  completionErrors,
+  completionOutcomes,
+  completionRequests,
   materializeInvocations,
+  resetCaptureFixtures,
   stageMaterializeFailure,
 } from "../test/packLoader.fixture.ts";
 import {
@@ -49,6 +54,22 @@ after(async () => {
 // Harness
 // ---------------------------------------------------------------------------
 
+/** One observed child-OMP spawn. */
+type SpawnRecord = { argv: string[]; signal: AbortSignal };
+
+/**
+ * How the injected seam should behave. `hang` never exits on its own, so the
+ * only way the promise settles is an abort — which is exactly what the
+ * cancellation and deadline tests need to observe.
+ */
+type SpawnBehavior = {
+  hang?: boolean;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  onSpawn?: (record: SpawnRecord) => void;
+};
+
 type Harness = {
   space: EphemeralSpace;
   spaceId: string;
@@ -56,7 +77,14 @@ type Harness = {
   tools: Map<string, ToolDefinition>;
   warnings: string[];
   envBackup: Record<string, string | undefined>;
+  spawns: SpawnRecord[];
+  behavior: SpawnBehavior;
   fireSessionStop(sessionId: string): Promise<void>;
+  fireSessionStopWith(
+    sessionId: string,
+    messages: unknown[],
+    controller?: AbortController,
+  ): Promise<void>;
 };
 
 async function closeHarness(harness: Harness): Promise<void> {
@@ -155,23 +183,52 @@ async function startHarness(spaceId: string, sessionId: string): Promise<Harness
     logger: { info: (_msg) => {}, warn: (message) => { warnings.push(message); } },
   };
 
-  await engramExtension(mockApi);
+  const spawns: SpawnRecord[] = [];
+  const behavior: SpawnBehavior = {};
+  const spawnOmp: OmpSpawn = (argv, spawnOptions) => {
+    const record: SpawnRecord = { argv, signal: spawnOptions.signal };
+    spawns.push(record);
+    behavior.onSpawn?.(record);
+    const exited = behavior.hang === true
+      ? new Promise<number>((resolveExit) => {
+          if (spawnOptions.signal.aborted) resolveExit(143);
+          else spawnOptions.signal.addEventListener("abort", () => resolveExit(143), { once: true });
+        })
+      : Promise.resolve(behavior.exitCode ?? 0);
+    return {
+      exited,
+      stdout: new Response(behavior.stdout ?? "").body!,
+      stderr: new Response(behavior.stderr ?? "").body!,
+    };
+  };
+
+  await engramExtension(mockApi, { spawnOmp });
   assert.ok(sessionStopHandler !== undefined, "session_stop handler was not registered");
 
-  async function fireSessionStop(stopSessionId: string): Promise<void> {
+  async function fireSessionStopWith(
+    stopSessionId: string,
+    messages: unknown[],
+    controller: AbortController = new AbortController(),
+  ): Promise<void> {
     process.env.ENGRAM_HOST_SESSION_ID = stopSessionId;
     await sessionStopHandler!(
       {
         type: "session_stop",
-        messages: [{ role: "user", id: "settle-user", content: "settle observation" }],
+        messages,
         session_id: stopSessionId,
         session_file: join(sessionsDir, `2026-08-22T12-00-00-000Z_${stopSessionId}.jsonl`),
         turn_id: 0,
         stop_hook_active: false,
-        signal: new AbortController().signal,
+        signal: controller.signal,
       },
       { cwd: space.root },
     );
+  }
+
+  async function fireSessionStop(stopSessionId: string): Promise<void> {
+    await fireSessionStopWith(stopSessionId, [
+      { role: "user", id: "settle-user", content: "settle observation" },
+    ]);
   }
   await fireSessionStop(sessionId);
   assert.equal(
@@ -180,7 +237,18 @@ async function startHarness(spaceId: string, sessionId: string): Promise<Harness
     `session resolution failed: ${warnings.join("\n")}`,
   );
 
-  return { space, spaceId, sessionId, tools, warnings, envBackup, fireSessionStop };
+  return {
+    space,
+    spaceId,
+    sessionId,
+    tools,
+    warnings,
+    envBackup,
+    spawns,
+    behavior,
+    fireSessionStop,
+    fireSessionStopWith,
+  };
 }
 
 /** Run the wrapped CLI and return parsed stdout plus the exit code. */
@@ -419,6 +487,167 @@ test("unknown and session-mismatched plan hashes are rejected without invoking t
     assert.deepEqual(status.pending_plan_hashes, []);
   } finally {
     stageMaterializeFailure(0);
+    await closeHarness(harness);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Ambient capture: isolated child-OMP completion and latest-user-turn context
+// ---------------------------------------------------------------------------
+
+test("headless completion spawns an isolated child OMP with the exact argv", async () => {
+  resetCaptureFixtures();
+  const harness = await startHarness("omp-complete-argv", "session-complete-argv");
+  try {
+    harness.behavior.stdout = "synthetic completion output";
+    await harness.fireSessionStopWith("session-complete-argv", [
+      { role: "user", id: "u1", content: "run-completion please" },
+    ]);
+
+    assert.equal(harness.spawns.length, 1, "expected exactly one child OMP spawn");
+    const spawn = harness.spawns[0];
+    assert.ok(spawn !== undefined, "child OMP was never spawned");
+    assert.deepEqual(spawn.argv, [
+      "omp",
+      "--no-session",
+      "--no-extensions",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--mode",
+      "text",
+      "--model",
+      "synthetic/provider-model",
+      "-p",
+      "synthetic extraction prompt",
+    ]);
+    assert.deepEqual(completionOutcomes, ["synthetic completion output"]);
+    assert.deepEqual(completionErrors, []);
+
+    const invocation = captureInvocations.at(-1);
+    assert.ok(invocation !== undefined, "the pack capture handler never ran");
+    assert.equal(invocation.hasComplete, true, "tools.complete was not supplied");
+    assert.equal(invocation.projectRoot, process.env.ENGRAM_PROJECT_ROOT);
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("a nonzero completion exit rejects with stderr as capture_model_failed", async () => {
+  resetCaptureFixtures();
+  const harness = await startHarness("omp-complete-fail", "session-complete-fail");
+  try {
+    harness.behavior.exitCode = 3;
+    harness.behavior.stderr = "synthetic provider rejected the request";
+    await harness.fireSessionStopWith("session-complete-fail", [
+      { role: "user", id: "u1", content: "run-completion please" },
+    ]);
+
+    assert.equal(completionErrors.length, 1);
+    const failure = completionErrors[0] ?? "";
+    assert.match(failure, /capture_model_failed/);
+    assert.match(failure, /exited 3/);
+    assert.match(failure, /synthetic provider rejected the request/);
+    assert.deepEqual(completionOutcomes, []);
+    // No deterministic fallback: the failure surfaces as a logged warning.
+    assert.ok(
+      harness.warnings.some((warning) => warning.includes("capture warning: ")
+        && warning.includes("capture_model_failed")),
+      `expected a visible capture warning, got: ${harness.warnings.join("\n")}`,
+    );
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("a 60-second request arms a bounded deadline that reports capture_timeout", async () => {
+  resetCaptureFixtures();
+  const harness = await startHarness("omp-complete-timeout", "session-complete-timeout");
+  try {
+    // The child never exits on its own; only the request's own deadline can
+    // end it, which is what proves the timer is armed and bounded.
+    harness.behavior.hang = true;
+    await harness.fireSessionStopWith("session-complete-timeout", [
+      { role: "user", id: "u1", content: "run-completion fast-deadline" },
+    ]);
+
+    assert.equal(completionRequests.length, 1);
+    assert.equal(completionRequests[0]?.timeoutSeconds, 0.05);
+    assert.equal(completionErrors.length, 1);
+    assert.match(completionErrors[0] ?? "", /capture_timeout/);
+    assert.deepEqual(completionOutcomes, []);
+
+    const spawn = harness.spawns[0];
+    assert.ok(spawn !== undefined, "child OMP was never spawned");
+    assert.equal(spawn.signal.aborted, true, "the deadline never aborted the child");
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("the stop-hook abort signal reaches the child and reports capture_cancelled", async () => {
+  resetCaptureFixtures();
+  const harness = await startHarness("omp-complete-cancel", "session-complete-cancel");
+  try {
+    const controller = new AbortController();
+    harness.behavior.hang = true;
+    // Abort the stop hook once the child is running: the combined signal must
+    // carry that cancellation into the spawned process.
+    harness.behavior.onSpawn = () => { controller.abort(); };
+
+    await harness.fireSessionStopWith(
+      "session-complete-cancel",
+      [{ role: "user", id: "u1", content: "run-completion please" }],
+      controller,
+    );
+
+    const spawn = harness.spawns[0];
+    assert.ok(spawn !== undefined, "child OMP was never spawned");
+    assert.equal(spawn.signal.aborted, true, "the stop-hook abort never reached the child");
+    assert.equal(completionErrors.length, 1);
+    assert.match(completionErrors[0] ?? "", /capture_cancelled/);
+    assert.deepEqual(completionOutcomes, []);
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("the turn narrative holds only the latest user message while tool provenance survives", async () => {
+  resetCaptureFixtures();
+  const harness = await startHarness("omp-latest-turn", "session-latest-turn");
+  try {
+    const messages = [
+      { role: "user", id: "u1", content: "first user question" },
+      { role: "assistant", id: "a1", content: "first assistant answer" },
+      { role: "user", id: "u2", content: "second user question" },
+      {
+        role: "assistant",
+        id: "a2",
+        content: "applying the approved plan",
+        tool_calls: [{ name: "engram_capture_apply", input: { plan_hash: "hash-abc" } }],
+      },
+      {
+        role: "tool",
+        id: "t1",
+        name: "engram_capture_apply",
+        content: '{"status":"committed","entity_keys":["demo:key-1"]}',
+      },
+    ];
+    await harness.fireSessionStopWith("session-latest-turn", messages);
+
+    const invocation = captureInvocations.at(-1);
+    assert.ok(invocation !== undefined, "the pack capture handler never ran");
+    assert.equal(invocation.narrative, "second user question");
+    assert.ok(!invocation.narrative.includes("first user question"));
+    assert.ok(!invocation.narrative.includes("first assistant answer"));
+    // turnIndex is the stable index of that user message, not the message
+    // count, so repeat settlement yields the same ambient record IDs.
+    assert.equal(invocation.turnIndex, 2);
+
+    const applyCall = invocation.toolCalls.find((call) => call.tool === "engram_capture_apply");
+    assert.ok(applyCall !== undefined, "the explicit apply call was dropped from tool provenance");
+    assert.deepEqual(applyCall.input, { plan_hash: "hash-abc" });
+    assert.equal(applyCall.result, '{"status":"committed","entity_keys":["demo:key-1"]}');
+  } finally {
     await closeHarness(harness);
   }
 });

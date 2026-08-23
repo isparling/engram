@@ -7,6 +7,7 @@ import type {
   KnowledgeRecord,
   PresentationPack,
   TurnContext,
+  TurnToolCall,
   PackHelpers,
 } from "../src/knowledgeTypes.ts";
 import type { ArtifactReplacementResult, HostCapturePreview } from "../src/captureTypes.ts";
@@ -117,33 +118,91 @@ export const externalDemo: KnowledgePack & PresentationPack & KnowledgeExtractor
 export const captureInvocations: Array<{
   sessionId: string;
   narrative: string;
+  turnIndex: number;
+  toolCalls: TurnToolCall[];
   spaceId: string;
   recordsRoot: string;
+  projectRoot: string;
   hasWriteFile: boolean;
   hasRefreshIndex: boolean;
+  hasComplete: boolean;
 }> = [];
+
+/** Completion requests the fixture asked the host to run, in order. */
+export const completionRequests: Array<{
+  model: string;
+  prompt: string;
+  system: string;
+  timeoutSeconds: number;
+}> = [];
+
+/** Completion outcomes observed by the fixture, in order. */
+export const completionOutcomes: string[] = [];
+
+/** Completion failures observed by the fixture, in order. */
+export const completionErrors: string[] = [];
+
+/** Clear every ambient-capture observation between tests. */
+export function resetCaptureFixtures(): void {
+  captureInvocations.length = 0;
+  completionRequests.length = 0;
+  completionOutcomes.length = 0;
+  completionErrors.length = 0;
+}
+
+type FixtureCaptureTools = {
+  spaceId: string;
+  recordsRoot: string;
+  projectRoot: string;
+  writeFile(path: string, content: string): Promise<void>;
+  refreshIndex(): Promise<void>;
+  complete(request: {
+    model: string;
+    prompt: string;
+    system: string;
+    timeoutSeconds: number;
+  }): Promise<string>;
+};
 
 export async function captureFromTurn(
   turn: TurnContext,
-  tools: {
-    spaceId: string;
-    recordsRoot: string;
-    writeFile(path: string, content: string): Promise<void>;
-    refreshIndex(): Promise<void>;
-  },
-): Promise<{ created: string[]; existing: string[]; invalid: [] }> {
+  tools: FixtureCaptureTools,
+): Promise<{ created: string[]; existing: string[]; invalid: []; warnings: string[] }> {
   captureInvocations.push({
     narrative: turn.narrative,
     sessionId: turn.session.id,
+    turnIndex: turn.turnIndex,
+    toolCalls: turn.toolCalls,
     spaceId: tools.spaceId,
     recordsRoot: tools.recordsRoot,
+    projectRoot: tools.projectRoot,
     hasWriteFile: typeof tools.writeFile === "function",
     hasRefreshIndex: typeof tools.refreshIndex === "function",
+    hasComplete: typeof tools.complete === "function",
   });
   if (turn.narrative.includes("linked-write")) {
     await tools.writeFile(join(tools.recordsRoot, "linked", "probe.md"), "probe");
   }
-  return { created: ["fixture-draft"], existing: [], invalid: [] };
+  if (turn.narrative.includes("run-completion")) {
+    // A sub-second deadline proves the bounded timer fires without making the
+    // suite wait out a realistic 60-second budget.
+    const request = {
+      model: "synthetic/provider-model",
+      prompt: "synthetic extraction prompt",
+      system: "",
+      timeoutSeconds: turn.narrative.includes("fast-deadline") ? 0.05 : 60,
+    };
+    completionRequests.push(request);
+    try {
+      completionOutcomes.push(await tools.complete(request));
+    } catch (error) {
+      // The pack owns failure policy: a completion failure produces a warning
+      // and no draft. There is no deterministic fallback.
+      completionErrors.push(String(error));
+      return { created: [], existing: [], invalid: [], warnings: [String(error)] };
+    }
+  }
+  return { created: ["fixture-draft"], existing: [], invalid: [], warnings: [] };
 }
 
 // ---------------------------------------------------------------------------

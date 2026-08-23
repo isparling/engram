@@ -59,6 +59,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   ArtifactReplacementResult,
   CaptureMutationView,
+  CompletionRequest,
   HostCapturePreview,
 } from "@isparling/engram-harness/capture-types";
 import type {
@@ -108,17 +109,42 @@ export interface ToolDefinition {
   execute: (params: Record<string, unknown>) => Promise<ToolResult>;
 }
 
+/**
+ * A spawned headless completion process. Mirrors the subset of Bun's
+ * Subprocess the extension consumes, so tests can inject a seam without
+ * launching a real child OMP.
+ */
+export type OmpCompletionProcess = {
+  exited: Promise<number>;
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+};
+
+/** Injectable child-OMP spawn seam. Production uses `Bun.spawn`. */
+export type OmpSpawn = (
+  argv: string[],
+  options: { signal: AbortSignal },
+) => OmpCompletionProcess;
+
+/** Test-only construction seam for the extension factory. */
+export type ExtensionOptions = {
+  spawnOmp?: OmpSpawn;
+};
+
 export type CaptureTools = {
   recordsRoot: string;
   spaceId: string;
+  projectRoot: string;
   writeFile(path: string, content: string): Promise<void>;
   refreshIndex(): Promise<void>;
+  complete(request: CompletionRequest): Promise<string>;
 };
 
 export type CaptureSummary = {
   created: string[];
   existing: string[];
   invalid: Array<{ id: string; errors: string[] }>;
+  warnings: string[];
 };
 
 export type CaptureHandler = (
@@ -583,7 +609,39 @@ function resolveCliPath(): string {
   }
 }
 
-export default async function engramExtension(api: ExtensionAPI): Promise<void> {
+/**
+ * Attribute a headless-completion failure to the precise cause the pack
+ * must distinguish. Cancellation wins over the deadline: an aborted stop
+ * hook means the whole turn is going away, not that the model was slow.
+ */
+function completionFailure(
+  signal: AbortSignal,
+  deadline: AbortSignal,
+  detail: string,
+): Error {
+  if (signal.aborted) return new Error(`capture_cancelled: ${detail}`);
+  if (deadline.aborted) return new Error(`capture_timeout: ${detail}`);
+  return new Error(`capture_model_failed: ${detail}`);
+}
+
+/** Artifact root handed to packs; defaults to the process working directory. */
+function artifactProjectRoot(): string {
+  const configured = process.env.ENGRAM_PROJECT_ROOT;
+  return configured !== undefined && configured.length > 0 ? configured : process.cwd();
+}
+
+export default async function engramExtension(
+  api: ExtensionAPI,
+  options: ExtensionOptions = {},
+): Promise<void> {
+  // Production spawns a real child OMP; tests inject a seam so the exact
+  // isolation argv can be asserted without launching a model.
+  const spawnOmp: OmpSpawn = options.spawnOmp ?? ((argv, spawnOptions) =>
+    Bun.spawn(argv, {
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: spawnOptions.signal,
+    }));
   const cliPath = resolveCliPath();
   const registryPath = process.env.ENGRAM_BINDING_REGISTRY;
 
@@ -794,6 +852,7 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
     return {
       recordsRoot,
       spaceId: extractionSpaceId,
+      projectRoot: artifactProjectRoot(),
       writeFile: async (path, content) => {
         signal.throwIfAborted();
         const target = resolve(path);
@@ -827,6 +886,49 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
           const stderr = await new Response(proc.stderr).text();
           throw new Error(`guarded space refresh failed (exit ${exitCode}): ${(stdout || stderr).slice(0, 500)}`);
         }
+      },
+      complete: async (request) => {
+        signal.throwIfAborted();
+        // The stop hook and the request's own deadline both terminate the
+        // child. Keeping the two signals separate lets the failure be
+        // attributed precisely instead of collapsing into one error.
+        const deadline = AbortSignal.timeout(request.timeoutSeconds * 1000);
+        const combined = AbortSignal.any([signal, deadline]);
+        // The system prompt rides in the prompt body: the isolation argv is
+        // fixed, and dropping `system` would silently lose pack instructions.
+        const prompt = request.system.length > 0
+          ? `${request.system}\n\n${request.prompt}`
+          : request.prompt;
+        const argv = [
+          "omp",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--mode",
+          "text",
+          "--model",
+          request.model,
+          "-p",
+          prompt,
+        ];
+        const proc = spawnOmp(argv, { signal: combined });
+        let exitCode: number;
+        try {
+          exitCode = await proc.exited;
+        } catch (error) {
+          throw completionFailure(signal, deadline, `headless completion failed: ${String(error)}`);
+        }
+        if (signal.aborted || deadline.aborted) {
+          throw completionFailure(signal, deadline, "headless completion did not finish");
+        }
+        if (exitCode !== 0) {
+          const stderr = await new Response(proc.stderr).text();
+          throw new Error(
+            `capture_model_failed: headless completion exited ${exitCode}: ${stderr.slice(0, 500)}`,
+          );
+        }
+        return await new Response(proc.stdout).text();
       },
     };
   }
@@ -897,9 +999,7 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
    */
   function materializeTools(entry: PendingCapture): StructuredMaterializeTools {
     return {
-      projectRoot: process.env.ENGRAM_PROJECT_ROOT !== undefined && process.env.ENGRAM_PROJECT_ROOT.length > 0
-        ? process.env.ENGRAM_PROJECT_ROOT
-        : process.cwd(),
+      projectRoot: artifactProjectRoot(),
       appliedAt: (entry.appliedAt ??= new Date().toISOString()),
       listRecords: async () => {
         const outcome = await runCli(["knowledge", "list", "--pack", extractionPackId, "--status", "active"]);
@@ -972,9 +1072,15 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
       try {
         const summary = await resolution.captureFromTurn(turn, await captureTools(event.signal));
         if (event.signal.aborted) return;
+        // Ambient capture never blocks the turn, so a silent warning would be
+        // invisible: every pack-reported failure surfaces here.
+        for (const warning of summary.warnings) {
+          api.logger.warn(`[engram] capture warning: ${warning}`);
+        }
         api.logger.info(
           `[engram] capture: ${summary.created.length} draft(s), ` +
-          `${summary.existing.length} existing, ${summary.invalid.length} invalid`,
+          `${summary.existing.length} existing, ${summary.invalid.length} invalid, ` +
+          `${summary.warnings.length} warning(s)`,
         );
         lastCapturedTurnKey = turnKey;
       } catch (error) {
@@ -1252,11 +1358,17 @@ function buildTurnContext(event: SessionStopEvent): TurnContext | undefined {
   );
   if (records.length === 0) return undefined;
 
-  let firstCurrentMessage = 0;
+  // Ambient capture reads only what the user just said. Anchoring on the LAST
+  // user message keeps `turnIndex` stable across repeat settlement of the same
+  // turn, which is what makes ambient record IDs deterministic — the total
+  // message count is not stable for that purpose.
+  let latestUserMessage = -1;
   for (let index = 0; index < records.length; index += 1) {
-    if (records[index]?.role === "user") firstCurrentMessage = index;
+    if (records[index]?.role === "user") latestUserMessage = index;
   }
-  const messages = records.slice(firstCurrentMessage);
+  if (latestUserMessage === -1) return undefined;
+  const messages = records.slice(latestUserMessage);
+  const narrative = extractTextContent(records[latestUserMessage] ?? {});
   const session: HostSessionProvenance = { id: event.session_id, host: "omp" };
   const lastAssistant = typeof event.last_assistant_message === "object" &&
     event.last_assistant_message !== null &&
@@ -1270,15 +1382,14 @@ function buildTurnContext(event: SessionStopEvent): TurnContext | undefined {
       ? rawTimestamp
       : new Date().toISOString();
 
-  const narrativeParts: string[] = [];
+  // Tool provenance from the latest user message onward is retained so the
+  // pack can suppress ambient duplicates of an explicit capture applied in
+  // this same turn.
   const toolCalls: TurnToolCall[] = [];
   for (const raw of messages) {
     const role = String(raw.role ?? "");
     const content = extractTextContent(raw);
-    if (role === "user") {
-      narrativeParts.push(`User: ${content}`);
-    } else if (role === "assistant") {
-      narrativeParts.push(`Assistant: ${content}`);
+    if (role === "assistant") {
       const toolCallsData = raw.tool_calls ?? raw.toolCalls;
       if (Array.isArray(toolCallsData)) {
         for (const tc of toolCallsData) {
@@ -1298,7 +1409,6 @@ function buildTurnContext(event: SessionStopEvent): TurnContext | undefined {
     } else if (role === "tool" || role === "tool_result") {
       const toolName = String(raw.name ?? raw.tool_name ?? "tool");
       const result = raw.content ?? raw.result;
-      narrativeParts.push(`Tool ${toolName}: returned`);
       const pending = [...toolCalls].reverse().find((tc) => tc.tool === toolName && tc.result === undefined);
       if (pending) {
         pending.result = typeof result === "string" ? result.slice(0, 500) : result;
@@ -1314,9 +1424,9 @@ function buildTurnContext(event: SessionStopEvent): TurnContext | undefined {
 
   return {
     session,
-    turnIndex: records.length,
+    turnIndex: latestUserMessage,
     timestamp,
-    narrative: narrativeParts.join("\n"),
+    narrative,
     toolCalls,
   };
 }
