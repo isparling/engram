@@ -51,7 +51,7 @@ export const externalDemo: KnowledgePack & PresentationPack & KnowledgeExtractor
   id: "external-demo",
   version: "0.1.0",
   validateEnvelope: () => ({ ok: true, value: undefined }),
-  relatedQuery: (envelope) => envelope.statement ?? "external query",
+  selectRelatedRecords: (envelope) => ({ mode: "search", query: envelope.statement ?? "external query" }),
   reconcile: () => ({ ok: true, value: { disposition: "new", summary: "synthetic", mutations: [] } }),
   retrievalPolicy: {
     allowedSourceClasses: ["all"],
@@ -118,7 +118,7 @@ const mismatchedIdentity: KnowledgePack & PresentationPack = {
   id: "fictional-integrity",
   version: "9.9.9",
   validateEnvelope: () => ({ ok: true, value: undefined }),
-  relatedQuery: (envelope) => envelope.statement ?? "mismatched query",
+  selectRelatedRecords: (envelope) => ({ mode: "search", query: envelope.statement ?? "mismatched query" }),
   reconcile: () => ({ ok: true, value: { disposition: "new", summary: "synthetic", mutations: [] } }),
   retrievalPolicy: {
     allowedSourceClasses: ["all"],

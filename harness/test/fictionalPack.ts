@@ -11,6 +11,7 @@ import type {
   PresentationPack,
   PackReconciliation,
   PackReconcileInput,
+  RelatedRecordSelection,
 } from "../src/knowledgeTypes.ts";
 
 function unique(values: string[], value: string): string[] {
@@ -229,9 +230,10 @@ export const fictionalPack: KnowledgePack & PresentationPack = {
     }
     return { ok: true, value: undefined };
   },
-  relatedQuery: (envelope) => {
+  selectRelatedRecords: (envelope): RelatedRecordSelection => {
     const relatedPhrase = envelope.details.related_phrase;
-    return typeof relatedPhrase === "string" && relatedPhrase.length > 0 ? relatedPhrase : envelope.statement;
+    const query = typeof relatedPhrase === "string" && relatedPhrase.length > 0 ? relatedPhrase : envelope.statement;
+    return { mode: "search", query };
   },
   reconcile,
   retrievalPolicy: presentationPolicy,

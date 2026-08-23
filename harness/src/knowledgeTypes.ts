@@ -121,11 +121,19 @@ export type PackReconciliation = {
   mutations: PackMutation[];
 };
 
+export type RelatedRecordSelection =
+  | { mode: "search"; query: string }
+  | {
+      mode: "exact";
+      description: string;
+      matches: (record: KnowledgeRecord) => boolean;
+    };
+
 export type KnowledgePack = {
   id: string;
   version: string;
   validateEnvelope: (envelope: KnowledgeEnvelope) => KnowledgeResult<void>;
-  relatedQuery: (envelope: KnowledgeEnvelope) => string;
+  selectRelatedRecords: (envelope: KnowledgeEnvelope) => RelatedRecordSelection;
   reconcile: (input: PackReconcileInput) => KnowledgeResult<PackReconciliation>;
 };
 

@@ -472,6 +472,49 @@ export async function retrieveEnumeratedRecords(
   };
 }
 
+// Builds the receipt for an exact related-record enumeration. Enumeration
+// never ranks and runs no query, so `query` stays null and
+// `relevanceThreshold` stays null regardless of any pack-declared search
+// threshold; locators inherit the deterministic filename order
+// `enumerateCandidates` produced, and only the matched record IDs appear.
+function receiptForEnumeratedRecords(
+  binding: ActiveSpace,
+  matched: readonly RelatedKnowledgeRecord[],
+  withheldCount: number,
+): RetrievalReceipt {
+  const base = emptyReceipt(binding, null, matched.length === 0 ? "miss" : "hit", "space");
+  return withheldReceipt(
+    { ...base, locatorUris: matched.map((item) => item.sourceUri), recordIds: matched.map((item) => item.record.id) },
+    withheldCount,
+  );
+}
+
+// Exact related-record discovery for pack reconciliation: enumerates the
+// active records root directly (zero qmd invocations — see
+// `enumerateCandidates`), passes every candidate through the SAME
+// containment/parser guard sequence a search hit would face
+// (`filterCandidates` with no policy filter and no score threshold, because
+// enumeration never ranks), and only then applies the pack-owned predicate
+// to fully parsed records. A symlink escaping the root fails closed here
+// exactly as it does for search: the predicate can never observe an
+// uncontained or unparseable locator.
+export async function retrieveExactRelatedRecords(
+  binding: ActiveSpace,
+  matches: (record: KnowledgeRecord) => boolean,
+): Promise<RetrievalOutcome> {
+  const enumerated = await enumerateCandidates(binding);
+  if (enumerated.kind === "failure") {
+    return { kind: "failure", errors: [enumerated.error], receipt: emptyReceipt(binding, null, "miss", "space") };
+  }
+  const guarded = await filterCandidates(binding, enumerated.candidates, undefined, false);
+  if (guarded.kind === "failure") {
+    return { kind: "failure", errors: [guarded.error], receipt: emptyReceipt(binding, null, "miss", "space") };
+  }
+  const matched = guarded.records.filter((item) => matches(item.record));
+  const receipt = receiptForEnumeratedRecords(binding, matched, guarded.withheldCount);
+  return matched.length === 0 ? { kind: "miss", records: [], receipt } : { kind: "hit", records: matched, receipt };
+}
+
 async function retrieveRecords(
   binding: ActiveSpace,
   query: string,

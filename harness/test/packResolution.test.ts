@@ -264,7 +264,7 @@ test("property: the CLI resolves a relative external pack from the binding that 
   id: "relative-demo",
   version: "0.1.0",
   validateEnvelope() { return { ok: true, value: undefined }; },
-  relatedQuery(envelope) { return envelope.statement; },
+  selectRelatedRecords(envelope) { return { mode: "search", query: envelope.statement }; },
   reconcile() { return { ok: true, value: { disposition: "new", summary: "synthetic", mutations: [] } }; },
   retrievalPolicy: {
     allowedSourceClasses: ["all"],

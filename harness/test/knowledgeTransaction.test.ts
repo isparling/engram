@@ -417,7 +417,7 @@ test("the core rejects a pack update that deletes existing relationship or histo
       }
       return { ok: true, value: undefined };
     },
-    relatedQuery: (envelope) => envelope.statement,
+    selectRelatedRecords: (envelope) => ({ mode: "search", query: envelope.statement }),
     reconcile: ({ candidate: submitted, related }): KnowledgeResult<PackReconciliation> => {
       const current = related[0];
       if (current === undefined) {
@@ -477,7 +477,7 @@ test("property: an existing update cannot erase or change sources, session, or s
       }
       return { ok: true, value: undefined };
     },
-    relatedQuery: (envelope) => envelope.statement,
+    selectRelatedRecords: (envelope) => ({ mode: "search", query: envelope.statement }),
     reconcile: ({ candidate: submitted, related }): KnowledgeResult<PackReconciliation> => {
       const current = related[0];
       if (current === undefined) {
@@ -934,7 +934,7 @@ test("a second fictional pack uses only the exported envelope and pack boundary"
       }
       return { ok: true, value: undefined };
     },
-    relatedQuery: (envelope) => envelope.statement,
+    selectRelatedRecords: (envelope) => ({ mode: "search", query: envelope.statement }),
     reconcile: ({ candidate: submitted }): KnowledgeResult<PackReconciliation> => {
       const record: KnowledgeRecord = {
         schemaVersion: 0,
@@ -1117,4 +1117,96 @@ test("CLI knowledge transaction runs the integrity scenario: reject, approve rev
   assert.equal(staleJson.status, "committed");
   assert.equal((staleJson.refresh as Record<string, unknown>).state, "index-stale");
   assert.match(await readFile(join(space.binding.recordsRoot, "cli-qmd-failure.md"), "utf8"), /cli-qmd-failure/);
+});
+test("exact related-record selection enumerates the space without qmd and selects only exact key matches", async () => {
+  const { active } = await makeSpace(TRANSACTION_A_RECORDS_DIR, "transaction-exact-related");
+  const claimPath = join(active.recordsRoot, "orbit-claim.md");
+  const claimParsed = parseKnowledgeRecord(await readFile(claimPath, "utf8"));
+  assert.equal(claimParsed.ok, true);
+  if (!claimParsed.ok) return;
+  claimParsed.value.details = { ...claimParsed.value.details, entityKey: "workout:key-alpha" };
+  await writeFile(claimPath, serializeKnowledgeRecord(claimParsed.value), "utf8");
+
+  // A phrase-similar sibling record: identical statement vocabulary to the
+  // candidate's related_phrase, but a different exact key. Semantic search
+  // would rank it alongside the keyed record; exact enumeration must exclude it.
+  const similarParsed = parseKnowledgeRecord(await readFile(claimPath, "utf8"));
+  assert.equal(similarParsed.ok, true);
+  if (!similarParsed.ok) return;
+  similarParsed.value.id = "orbit-similar";
+  similarParsed.value.details = { ...similarParsed.value.details, entityKey: "workout:key-beta" };
+  similarParsed.value.sources = [{ type: "observation", ref: "source:orbit-similar" }];
+  await writeFile(join(active.recordsRoot, "orbit-similar.md"), serializeKnowledgeRecord(similarParsed.value), "utf8");
+
+  const exactKeyPack: KnowledgePack = {
+    ...fictionalPack,
+    selectRelatedRecords: (envelope) => {
+      const entityKey = envelope.details.entityKey;
+      return {
+        mode: "exact",
+        description: `details.entityKey=${String(entityKey)}`,
+        matches: (record) => record.details.entityKey === entityKey,
+      };
+    },
+    reconcile: ({ candidate, related }) => {
+      assert.deepEqual(related.map((record) => record.id), ["orbit-claim"]);
+      return fictionalPack.reconcile({ candidate, related });
+    },
+  };
+
+  const qmd = makeAlwaysSucceedsSpawnFn("exact related-record selection must never run qmd");
+  const outcome = await reconcileKnowledgeTransaction({
+    binding: active,
+    candidateInput: candidate("contradict", {
+      details: { basis: "synthetic-observation", certainty: "provisional", related_phrase: "staged rollout prevents replay", entityKey: "workout:key-alpha" },
+    }),
+    pack: exactKeyPack,
+    spawnFn: qmd.spawnFn,
+  });
+
+  assert.equal(qmd.calls.length, 0, "exact selection must perform zero qmd invocations");
+  const proposal = proposalOf(outcome);
+  assert.equal(proposal.retrieval.scope, "space");
+  assert.equal(proposal.retrieval.query, null);
+  assert.equal(proposal.retrieval.relevanceThreshold, null);
+  assert.deepEqual(proposal.retrieval.recordIds, ["orbit-claim"]);
+  assert.deepEqual(proposal.retrieval.locatorUris, [hitUri(active, "orbit-claim.md")]);
+});
+
+test("exact selector symlink escape fails retrieval before the pack predicate can accept the record", async () => {
+  const { active } = await makeSpace(TRANSACTION_A_RECORDS_DIR, "transaction-exact-symlink");
+  const claimPath = join(active.recordsRoot, "orbit-claim.md");
+  const parsed = parseKnowledgeRecord(await readFile(claimPath, "utf8"));
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  // The outside target carries the exact key the pack predicate accepts, so
+  // only the containment guard — never the predicate — can stop it.
+  parsed.value.details = { ...parsed.value.details, entityKey: "workout:key-alpha" };
+  await replaceRecordWithOutsideSymlink(active, "orbit-claim", serializeKnowledgeRecord(parsed.value));
+
+  let predicateInvocations = 0;
+  const acceptingPack: KnowledgePack = {
+    ...fictionalPack,
+    selectRelatedRecords: () => ({
+      mode: "exact",
+      description: "details.entityKey=workout:key-alpha",
+      matches: (record) => {
+        predicateInvocations++;
+        return record.details.entityKey === "workout:key-alpha";
+      },
+    }),
+    reconcile: ({ candidate, related }) => fictionalPack.reconcile({ candidate, related }),
+  };
+
+  const outcome = await reconcileKnowledgeTransaction({
+    binding: active,
+    candidateInput: candidate("contradict"),
+    pack: acceptingPack,
+    spawnFn: makeAlwaysSucceedsSpawnFn("exact selection must never run qmd").spawnFn,
+  });
+
+  assert.equal(outcome.status, "retrieval_failed");
+  if (outcome.status !== "retrieval_failed") return;
+  assertPathEscapeFailure(outcome.errors);
+  assert.equal(predicateInvocations, 0, "pack predicate must not see an uncontained locator");
 });

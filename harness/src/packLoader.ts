@@ -92,7 +92,7 @@ function isKnowledgePack(value: unknown): value is KnowledgePack & PresentationP
     typeof value.id === "string" &&
     typeof value.version === "string" &&
     typeof value.validateEnvelope === "function" &&
-    typeof value.relatedQuery === "function" &&
+    typeof value.selectRelatedRecords === "function" &&
     typeof value.reconcile === "function" &&
     isSourceClassPolicy(value.retrievalPolicy) &&
     Array.isArray(value.views) && value.views.every(isView) &&

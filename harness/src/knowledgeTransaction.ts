@@ -4,7 +4,7 @@ import { relative, resolve, sep } from "node:path";
 import { atomicWriteFile, AtomicWriteDirectorySyncError } from "./atomicWrite.ts";
 import { canonicalJson, hashKnowledgeText, parseKnowledgeRecord, serializeKnowledgeRecord } from "./knowledgeRecord.ts";
 import { validateKnowledgeEnvelope } from "./knowledgeValidation.ts";
-import { retrieveRelatedRecords, type RetrievalReceipt } from "./knowledgeRetrieval.ts";
+import { retrieveExactRelatedRecords, retrieveRelatedRecords, type RetrievalOutcome, type RetrievalReceipt } from "./knowledgeRetrieval.ts";
 import { acquireTransactionLock, transactionLockDirectory, type TransactionLock, type TransactionLockHooks } from "./transactionLock.ts";
 import { REFRESH_NOT_ATTEMPTED, refreshQmdCollection, type AttemptedRefreshReport, type RefreshReport, type SpawnFn } from "./qmdRunner.ts";
 import { resolveRecordPath } from "./spaceBinding.ts";
@@ -466,11 +466,20 @@ export async function reconcileKnowledgeTransaction(input: {
 }): Promise<ReconcileOutcome> {
   const candidateResult = prepareCandidate(input.binding, input.candidateInput, input.pack);
   if (!candidateResult.ok) return invalidOutcome(candidateResult.errors);
-  const query = input.pack.relatedQuery(candidateResult.value);
-  if (typeof query !== "string" || query.trim().length === 0 || /[\r\n]/.test(query)) {
-    return invalidOutcome([validationError("query_invalid", "pack retrieval query must be a non-empty single-line string")]);
+  const selection = input.pack.selectRelatedRecords(candidateResult.value);
+  let retrieval: RetrievalOutcome;
+  if (selection.mode === "search") {
+    const query = selection.query;
+    if (typeof query !== "string" || query.trim().length === 0 || /[\r\n]/.test(query)) {
+      return invalidOutcome([validationError("query_invalid", "pack retrieval query must be a non-empty single-line string")]);
+    }
+    retrieval = await retrieveRelatedRecords(input.binding, query, input.spawnFn);
+  } else {
+    // Exact mode changes related-record discovery only: qmd is never invoked
+    // and the authoritative re-read plus beforeHash capture below still apply
+    // to every returned record.
+    retrieval = await retrieveExactRelatedRecords(input.binding, selection.matches);
   }
-  const retrieval = await retrieveRelatedRecords(input.binding, query, input.spawnFn);
   if (retrieval.kind === "failure") return { schema_version: 0, status: "retrieval_failed", errors: retrieval.errors, retrieval: retrieval.receipt };
   const relatedRecords = retrieval.kind === "hit" ? retrieval.records : [];
   if (input.afterRetrieval !== undefined) await input.afterRetrieval();
