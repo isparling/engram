@@ -22,6 +22,11 @@ supplies create-only records-root writes plus scoped qmd refresh mechanics.
 The pack owns all draft policy. Modules without the handler retain the generic
 `engram capture-from-turn` CLI fallback.
 
+For a fresh OMP session, an existing manual selection wins. Otherwise the
+extension selects `ENGRAM_SPACE_ID`, then the nearest `engram.space.json`.
+Selection still passes through the registry's validated `space select`
+command; the extension never creates or registers a space.
+
 ## Behavior
 
 The extension registers two tools and one lifecycle hook:

@@ -19,8 +19,8 @@ import engramExtension, {
   type ExtensionContext,
   type ToolDefinition,
 } from "./omp-extension.ts";
+import { registerSpace } from "../src/spaceRegistry.ts";
 import { captureInvocations } from "../test/packLoader.fixture.ts";
-import { registerSpace, selectSpace } from "../src/spaceRegistry.ts";
 import {
   createUninitializedEphemeralSpace,
   destroyEphemeralSpace,
@@ -53,8 +53,8 @@ test("ompExtension property: engram_capture tool resolves external pack via from
   spacesToClean.push(space);
   const spaceId = "omp-ext-from";
   const sessionId = "omp-ext-from-session";
+  const manifestPath = join(space.root, "engram.space.json");
 
-  const manifestPath = join(space.root, "space.json");
   const sessionsDir = join(space.root, "sessions");
   const registryPath = join(space.root, "registry.json");
   const bindingPath = join(space.root, "binding.json");
@@ -99,10 +99,6 @@ test("ompExtension property: engram_capture tool resolves external pack via from
   if (!registered.ok) {
     assert.fail(`space registration failed: ${JSON.stringify(registered.errors)}`);
   }
-  const selected = await selectSpace(registryPath, spaceId, sessionId);
-  if (!selected.ok) {
-    assert.fail(`space selection failed: ${JSON.stringify(selected.errors)}`);
-  }
   let sessionStopHandler: ((event: SessionStopEvent, ctx: ExtensionContext) => void | Promise<void>) | undefined;
   let toolHandler: ToolDefinition["execute"] | undefined;
   const warnings: string[] = [];
@@ -123,6 +119,7 @@ test("ompExtension property: engram_capture tool resolves external pack via from
   process.env.ENGRAM_BINDING_REGISTRY = registryPath;
   process.env.ENGRAM_HOST_SESSION_ID = sessionId;
   process.env.ENGRAM_CLI = wrapperPath;
+  delete process.env.ENGRAM_SPACE_ID;
 
   try {
     const mockApi: ExtensionAPI = {
@@ -257,9 +254,35 @@ test("ompExtension property: engram_capture tool resolves external pack via from
     assert.ok(result.content[0], "engram_capture returned no text content");
     const payload = JSON.parse(result.content[0].text) as { status: string };
     assert.equal(payload.status, "submitted", `expected submitted, got ${JSON.stringify(result)}`);
+
+    const overrideSessionId = "omp-ext-env-override-session";
+    const nestedCwd = join(space.root, "nested");
+    await mkdir(nestedCwd);
+    await writeFile(
+      join(nestedCwd, "engram.space.json"),
+      JSON.stringify({ schema_version: 0, space_id: "wrong-space" }),
+      "utf8",
+    );
+    process.env.ENGRAM_SPACE_ID = spaceId;
+    await sessionStopHandler(
+      {
+        type: "session_stop",
+        messages: [{ role: "user", id: "override-user", content: "override observation" }],
+        session_id: overrideSessionId,
+        session_file: join(sessionsDir, `2026-08-22T13-00-00-000Z_${overrideSessionId}.jsonl`),
+        turn_id: 0,
+        stop_hook_active: false,
+        signal: new AbortController().signal,
+      },
+      { cwd: nestedCwd },
+    );
+    assert.equal(captureInvocations.at(-1)?.sessionId, overrideSessionId);
+    assert.equal(captureInvocations.at(-1)?.spaceId, spaceId);
+    delete process.env.ENGRAM_SPACE_ID;
   } finally {
     process.env.ENGRAM_BINDING_REGISTRY = envBackup.ENGRAM_BINDING_REGISTRY;
     process.env.ENGRAM_HOST_SESSION_ID = envBackup.ENGRAM_HOST_SESSION_ID;
     process.env.ENGRAM_CLI = envBackup.ENGRAM_CLI;
+    process.env.ENGRAM_SPACE_ID = envBackup.ENGRAM_SPACE_ID;
   }
 });

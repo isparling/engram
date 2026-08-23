@@ -19,6 +19,7 @@
  *
  *   ENGRAM_BINDING_REGISTRY  (required)  path to the engram binding registry
  *   ENGRAM_CLI              (optional)  path to engram CLI binary (default: "engram")
+ *   ENGRAM_SPACE_ID         (optional)  override nearest engram.space.json
  *
  * ## Design
  *
@@ -234,6 +235,62 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
       ENGRAM_HOST_SESSION_ID: hostSessionId ?? "pending",
     };
   }
+  async function configuredSpaceId(cwd: string): Promise<string | undefined> {
+    const override = process.env.ENGRAM_SPACE_ID?.trim();
+    if (override !== undefined && override !== "") return override;
+
+    let directory = resolve(cwd);
+    while (true) {
+      const manifestPath = join(directory, "engram.space.json");
+      try {
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+          schema_version?: unknown;
+          space_id?: unknown;
+        };
+        if (manifest.schema_version !== 0 || typeof manifest.space_id !== "string" || manifest.space_id === "") {
+          throw new Error(`invalid Engram space manifest: ${manifestPath}`);
+        }
+        return manifest.space_id;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const parent = dirname(directory);
+      if (parent === directory) return undefined;
+      directory = parent;
+    }
+  }
+
+  async function ensureSessionSelection(cwd: string, signal: AbortSignal): Promise<void> {
+    const statusProc = Bun.spawn([cliPath, "space", "status"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: cliEnv(),
+      signal,
+    });
+    const statusExit = await statusProc.exited;
+    if (statusExit === 0) {
+      const status = JSON.parse(await new Response(statusProc.stdout).text()) as {
+        active_spaces?: Record<string, unknown>;
+      };
+      if (hostSessionId !== undefined && status.active_spaces?.[hostSessionId] !== undefined) return;
+    }
+
+    const spaceId = await configuredSpaceId(cwd);
+    if (spaceId === undefined) return;
+    signal.throwIfAborted();
+    const selectProc = Bun.spawn([cliPath, "space", "select", spaceId], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: cliEnv(),
+      signal,
+    });
+    const selectExit = await selectProc.exited;
+    if (selectExit !== 0) {
+      const stdout = await new Response(selectProc.stdout).text();
+      const stderr = await new Response(selectProc.stderr).text();
+      throw new Error(`automatic space selection failed (exit ${selectExit}): ${(stdout || stderr).slice(0, 500)}`);
+    }
+  }
 
   // Active-space state is session-bound. OMP keeps extension instances alive
   // across session switches, so every new session must resolve independently.
@@ -383,7 +440,7 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
   // -----------------------------------------------------------------------
   // Structural capture: awaited final-settle hook
   // -----------------------------------------------------------------------
-  api.on("session_stop", async (event: SessionStopEvent, _ctx: ExtensionContext) => {
+  api.on("session_stop", async (event: SessionStopEvent, ctx: ExtensionContext) => {
     if (event.signal.aborted) return;
     if (event.session_id === "") {
       api.logger.warn("[engram] session_stop omitted a host session id");
@@ -391,6 +448,12 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
     }
     if (hostSessionId !== event.session_id) resetSessionResolution();
     hostSessionId = event.session_id;
+    try {
+      await ensureSessionSelection(ctx.cwd, event.signal);
+    } catch (error) {
+      if (!event.signal.aborted) api.logger.warn(`[engram] ${String(error)}`);
+      return;
+    }
     await resolveExtractionPack();
     if (!resolvedPackId) {
       api.logger.warn("[engram] session_stop could not resolve an active extraction pack");

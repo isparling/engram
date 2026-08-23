@@ -20,6 +20,8 @@ Two things happen automatically:
 - Oh My Pi must be installed.
 - `@isparling/engram-omp` and `@isparling/engram-cli` must be installed.
 - A valid engram binding registry must exist.
+- The project must contain an `engram.space.json` for its registered space, or
+  `ENGRAM_SPACE_ID` must name the intended registered space.
 
 ## Install the Extension
 
@@ -42,11 +44,15 @@ The extension reads these variables at session start:
 |----------|----------|---------|
 | `ENGRAM_BINDING_REGISTRY` | Yes | Path to the engram binding registry file |
 | `ENGRAM_CLI` | No | Path to the engram CLI binary. Default is `engram` |
+| `ENGRAM_SPACE_ID` | No | Overrides the nearest `engram.space.json` space id |
 
-Set `ENGRAM_BINDING_REGISTRY` before you start Oh My Pi.
+Set `ENGRAM_BINDING_REGISTRY` before you start Oh My Pi. On the first settled
+turn of each fresh session, the extension preserves any existing manual
+selection; otherwise it selects `ENGRAM_SPACE_ID`, then falls back to the
+nearest `engram.space.json`.
 
-You can also set `ENGRAM_CLI` if the CLI is not resolvable from the
-installed `@isparling/engram-cli` package or from your PATH.
+Set `ENGRAM_CLI` only if the CLI is not resolvable from the installed
+`@isparling/engram-cli` package or from `PATH`.
 
 ## How to Start Oh My Pi with the Extension
 
