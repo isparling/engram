@@ -11,11 +11,15 @@
     },
     "./knowledge-types": {
       "import": "./src/knowledgeTypes.ts"
+    },
+    "./capture-types": {
+      "import": "./src/captureTypes.ts"
     }
   },
   "files": [
     "src/packTypes.ts",
     "src/knowledgeTypes.ts",
+    "src/captureTypes.ts",
     "README.md"
   ],
   "publishConfig": {

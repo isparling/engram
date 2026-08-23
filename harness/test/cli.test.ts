@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { copyFile, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,8 +14,11 @@ import { after, test } from "node:test";
 import { registerSpace, selectSpace } from "../src/spaceRegistry.ts";
 import { guardedRetrieve } from "../src/guardedRetrieval.ts";
 import { fictionalPack } from "../test/fictionalPack.ts";
+import { serializeKnowledgeRecord } from "../src/knowledgeRecord.ts";
+import type { KnowledgeRecord, KnowledgeStatus } from "../src/knowledgeTypes.ts";
 import {
   createEphemeralSpace,
+  createUninitializedEphemeralSpace,
   destroyEphemeralSpace,
   SPACE_A_RECORDS_DIR,
   SPACE_B_RECORDS_DIR,
@@ -483,4 +486,152 @@ test("CLI: version refuses missing embedded metadata without exposing its locati
   });
   assert.equal(result.stderr, "");
   assert.equal(result.stdout.includes(result.root), false);
+});
+
+function listingRecord(id: string, packId: string, status: KnowledgeStatus, spaceId: string): KnowledgeRecord {
+  return {
+    schemaVersion: 0,
+    id,
+    kind: "claim",
+    status,
+    statement: `CLI fixture statement for ${id}.`,
+    details: {},
+    scope: { space: spaceId, subjects: [], topics: [], contexts: [], dimensions: {} },
+    pack: { id: packId, version: "0.1.0" },
+    sources: [{ type: "fixture", ref: `cli-fixture-${id}` }],
+    session: { id: "cli-listing-fixture-session", host: "engram-test" },
+    submittedAt: "2026-08-22",
+    disposition: "new",
+    relationships: { supports: [], contradicts: [], refines: [], supersedes: [] },
+    history: [],
+  };
+}
+
+/**
+ * A registered, selected space whose records root starts EMPTY. The copied
+ * space-a fixture records use the legacy title/updated frontmatter and would
+ * fail schema-0 parsing under guarded enumeration, so they are cleared before
+ * a test seeds its own schema-0 records.
+ */
+async function prepareEmptyRecordsSpace(spaceId: string, hostSessionId: string): Promise<{ space: EphemeralSpace; registryPath: string }> {
+  const space = await createUninitializedEphemeralSpace(SPACE_A_RECORDS_DIR, spaceId);
+  spacesToClean.push(space);
+  for (const entry of await readdir(space.binding.recordsRoot)) {
+    await rm(join(space.binding.recordsRoot, entry), { recursive: true, force: true });
+  }
+  const registryPath = join(space.root, "registry.json");
+  const bindingPath = await writeLocalBindingFixture(space, spaceId);
+  const registered = await registerSpace(registryPath, bindingPath);
+  assert.equal(registered.ok, true);
+  const selected = await selectSpace(registryPath, spaceId, hostSessionId);
+  assert.equal(selected.ok, true);
+  return { space, registryPath };
+}
+
+test("CLI: knowledge list filters seeded records by pack and status and prints ordered JSON", async () => {
+  const spaceId = "cli-knowledge-list";
+  const sessionId = "cli-knowledge-list-session";
+  const { space, registryPath } = await prepareEmptyRecordsSpace(spaceId, sessionId);
+
+  await writeFile(
+    join(space.binding.recordsRoot, "active-a.md"),
+    serializeKnowledgeRecord(listingRecord("active-a", "cli-list-pack", "active", spaceId)),
+    "utf8",
+  );
+  await writeFile(
+    join(space.binding.recordsRoot, "active-b.md"),
+    serializeKnowledgeRecord(listingRecord("active-b", "cli-list-pack", "active", spaceId)),
+    "utf8",
+  );
+  await writeFile(
+    join(space.binding.recordsRoot, "candidate-c.md"),
+    serializeKnowledgeRecord(listingRecord("candidate-c", "cli-list-pack", "candidate", spaceId)),
+    "utf8",
+  );
+
+  const result = await runCli(["knowledge", "list", "--pack", "cli-list-pack", "--status", "active"], registryPath, sessionId);
+  assert.equal(result.code, 0, `stderr: ${result.stderr}`);
+  const parsed = JSON.parse(result.stdout) as { schema_version: number; status: string; records: KnowledgeRecord[] };
+  assert.equal(parsed.schema_version, 0);
+  assert.equal(parsed.status, "ok");
+  assert.deepEqual(parsed.records.map((record) => record.id), ["active-a", "active-b"]);
+});
+
+test("CLI: knowledge list surfaces a guarded confinement error as structured JSON and exits nonzero", async () => {
+  const spaceId = "cli-knowledge-list-escape";
+  const sessionId = "cli-knowledge-list-escape-session";
+  const { space, registryPath } = await prepareEmptyRecordsSpace(spaceId, sessionId);
+
+  await writeFile(
+    join(space.binding.recordsRoot, "active-a.md"),
+    serializeKnowledgeRecord(listingRecord("active-a", "cli-list-pack", "active", spaceId)),
+    "utf8",
+  );
+  await symlink(join(space.root, "binding.json"), join(space.binding.recordsRoot, "escape.md"));
+
+  const result = await runCli(["knowledge", "list", "--pack", "cli-list-pack", "--status", "active"], registryPath, sessionId);
+  assert.equal(result.code, 1);
+  const parsed = JSON.parse(result.stdout) as { schema_version: number; status: string; errors: Array<{ code: string }> };
+  assert.equal(parsed.schema_version, 0);
+  assert.equal(parsed.status, "invalid");
+  assert.ok(parsed.errors.some((error) => error.code === "path_escape"), `expected a path_escape error, got: ${JSON.stringify(parsed.errors)}`);
+});
+
+test("CLI: artifact replace writes through the write-root-confined path and is a byte-identical no-op on repeat", async () => {
+  const spaceId = "cli-artifact-replace";
+  const sessionId = "cli-artifact-replace-session";
+  const { space, registryPath } = await prepareEmptyRecordsSpace(spaceId, sessionId);
+
+  const artifactRoot = join(space.root, "artifacts");
+  await mkdir(artifactRoot, { recursive: true });
+  const inputDir = await mkdtemp(join(tmpdir(), "engram-cli-artifact-input-"));
+  scratchDirsToClean.push(inputDir);
+  const inputPath = join(inputDir, "content.md");
+  await writeFile(inputPath, "# Regenerated view\n", "utf8");
+
+  const first = await runCli(
+    ["artifact", "replace", "--root", artifactRoot, "--relative", "views/out.md", "--input", inputPath],
+    registryPath,
+    sessionId,
+  );
+  assert.equal(first.code, 0, `stderr: ${first.stderr}`);
+  const firstParsed = JSON.parse(first.stdout) as { schema_version: number; status: string; path: string };
+  assert.equal(firstParsed.schema_version, 0);
+  assert.equal(firstParsed.status, "replaced");
+  assert.equal(firstParsed.path, join(artifactRoot, "views", "out.md"));
+  assert.equal(await readFile(join(artifactRoot, "views", "out.md"), "utf8"), "# Regenerated view\n");
+
+  const second = await runCli(
+    ["artifact", "replace", "--root", artifactRoot, "--relative", "views/out.md", "--input", inputPath],
+    registryPath,
+    sessionId,
+  );
+  assert.equal(second.code, 0, `stderr: ${second.stderr}`);
+  const secondParsed = JSON.parse(second.stdout) as { schema_version: number; status: string; path: string };
+  assert.equal(secondParsed.status, "unchanged");
+});
+
+test("CLI: artifact replace refuses a root outside the active write roots as structured JSON and exits nonzero", async () => {
+  const spaceId = "cli-artifact-replace-outside";
+  const sessionId = "cli-artifact-replace-outside-session";
+  const { registryPath } = await prepareEmptyRecordsSpace(spaceId, sessionId);
+
+  const outsideDir = await mkdtemp(join(tmpdir(), "engram-cli-artifact-outside-"));
+  scratchDirsToClean.push(outsideDir);
+  const inputDir = await mkdtemp(join(tmpdir(), "engram-cli-artifact-outside-input-"));
+  scratchDirsToClean.push(inputDir);
+  const inputPath = join(inputDir, "content.md");
+  await writeFile(inputPath, "outside\n", "utf8");
+
+  const result = await runCli(
+    ["artifact", "replace", "--root", outsideDir, "--relative", "out.md", "--input", inputPath],
+    registryPath,
+    sessionId,
+  );
+  assert.equal(result.code, 1);
+  const parsed = JSON.parse(result.stdout) as { schema_version: number; status: string; errors: Array<{ code: string }> };
+  assert.equal(parsed.schema_version, 0);
+  assert.equal(parsed.status, "invalid");
+  assert.ok(parsed.errors.some((error) => error.code === "root_not_writable"), `expected root_not_writable, got: ${JSON.stringify(parsed.errors)}`);
+  assert.equal(await readFile(join(outsideDir, "out.md"), "utf8").catch(() => "(absent)"), "(absent)");
 });

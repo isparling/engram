@@ -46,7 +46,7 @@ import { submitCandidate, type SubmitOutcome } from "./submit.ts";
 import { refreshQmdCollection, REFRESH_NOT_ATTEMPTED } from "./qmdRunner.ts";
 import { guardedRetrieve } from "./guardedRetrieval.ts";
 import { renderPresentation } from "./presentation.ts";
-import type { KnowledgePack, KnowledgeExtractor, PresentationPack, TurnContext, TurnToolCall, PackHelpers } from "./knowledgeTypes.ts";
+import { KNOWLEDGE_STATUSES, type KnowledgePack, type KnowledgeExtractor, type KnowledgeStatus, type PresentationPack, type TurnContext, type TurnToolCall, type PackHelpers } from "./knowledgeTypes.ts";
 import { loadExtractionPack, resolveKnowledgePack } from "./packLoader.ts";
 import { requireDefined } from "./types.ts";
 import {
@@ -56,6 +56,8 @@ import {
   type ApplyKnowledgeOutcome,
 } from "./knowledgeTransaction.ts";
 import { approveKnowledgeRollup, previewKnowledgeRollup, type KnowledgeRollupApplyOutcome } from "./knowledgeRollup.ts";
+import { listKnowledgeRecords } from "./knowledgeListing.ts";
+import { replaceArtifact } from "./artifactReplacement.ts";
 import { readReleaseManifest } from "../../release/engram-release.ts";
 
 function printJson(value: unknown): void {
@@ -67,6 +69,7 @@ const USAGE = [
   "       engram knowledge submit --candidate <path>",
   "       engram knowledge reconcile --candidate <path>",
   "       engram knowledge approve|reject --candidate <path> --expect <plan_hash>",
+  "       engram knowledge list --pack <id> --status <status> [--status <status> ...]",
   "       engram rollup preview --bullets <path>",
   "       engram rollup approve --bullets <path> --expect <rollup-hash>",
   "       engram space register --binding <path>",
@@ -75,6 +78,7 @@ const USAGE = [
   "       engram space refresh",
   "       engram recall --query <text> --audience <id> [--source-class <class>]",
   "       engram render --view <id> --audience <id> --delivery <id> --model <provider/model> [--query <text>]",
+  "       engram artifact replace --root <absolute-root> --relative <path> --input <file>",
 ].join("\n");
 
 function usageError(message: string): never {
@@ -299,6 +303,31 @@ function knowledgeArgs(rest: string[]): { candidatePath: string; expectHash?: st
   return { candidatePath, ...(expectHash === undefined ? {} : { expectHash }) };
 }
 
+function knowledgeListArgs(rest: string[]): { packId: string; statuses: KnowledgeStatus[] } {
+  let packId: string | undefined;
+  const statuses: KnowledgeStatus[] = [];
+  for (let index = 0; index < rest.length; index++) {
+    const arg = rest[index];
+    if (arg === "--pack") {
+      index++;
+      packId = rest[index];
+      if (packId === undefined) usageError("--pack requires a value");
+    } else if (arg === "--status") {
+      index++;
+      const rawStatus = rest[index];
+      if (rawStatus === undefined) usageError("--status requires a value");
+      const status = KNOWLEDGE_STATUSES.find((candidate) => candidate === rawStatus);
+      if (status === undefined) usageError(`--status must be one of ${KNOWLEDGE_STATUSES.join(", ")}`);
+      statuses.push(status);
+    } else {
+      usageError(`unrecognized argument: ${arg}`);
+    }
+  }
+  if (packId === undefined) usageError("knowledge list requires --pack <id>");
+  if (statuses.length === 0) usageError("knowledge list requires at least one --status <status>");
+  return { packId, statuses };
+}
+
 function knowledgeExit(outcome: ApplyKnowledgeOutcome): never {
   if (outcome.status === "committed" || outcome.status === "rejected" || outcome.status === "no_change") process.exit(0);
   if (outcome.status === "stale_approval") process.exit(3);
@@ -306,8 +335,28 @@ function knowledgeExit(outcome: ApplyKnowledgeOutcome): never {
   process.exit(1);
 }
 
+async function runKnowledgeListCommand(rest: string[]): Promise<void> {
+  const parsed = knowledgeListArgs(rest);
+  const bindingResult = await resolveActiveSpace(process.env);
+  if (!bindingResult.ok) {
+    printJson({ schema_version: 0, status: "invalid", errors: bindingResult.errors });
+    process.exit(1);
+  }
+  const result = await listKnowledgeRecords(bindingResult.value, parsed);
+  if (!result.ok) {
+    printJson({ schema_version: 0, status: "invalid", errors: result.errors });
+    process.exit(1);
+  }
+  printJson({ schema_version: 0, status: "ok", records: result.value });
+  process.exit(0);
+}
+
 async function runKnowledgeCommand(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args;
+  if (subcommand === "list") {
+    await runKnowledgeListCommand(rest);
+    return;
+  }
   if (subcommand !== "submit" && subcommand !== "reconcile" && subcommand !== "approve" && subcommand !== "reject") {
     usageError(`unknown knowledge command: ${subcommand ?? "(none)"}`);
   }
@@ -681,6 +730,74 @@ async function runVersionCommand(): Promise<void> {
   });
 }
 
+function artifactReplaceArgs(rest: string[]): { root: string; relativePath: string; inputPath: string } {
+  let root: string | undefined;
+  let relativePath: string | undefined;
+  let inputPath: string | undefined;
+  for (let index = 0; index < rest.length; index++) {
+    const arg = rest[index];
+    if (arg === "--root") {
+      index++;
+      root = rest[index];
+      if (root === undefined) usageError("--root requires a value");
+    } else if (arg === "--relative") {
+      index++;
+      relativePath = rest[index];
+      if (relativePath === undefined) usageError("--relative requires a value");
+    } else if (arg === "--input") {
+      index++;
+      inputPath = rest[index];
+      if (inputPath === undefined) usageError("--input requires a value");
+    } else {
+      usageError(`unrecognized argument: ${arg}`);
+    }
+  }
+  if (root === undefined) usageError("artifact replace requires --root <absolute-root>");
+  if (!isAbsolute(root)) usageError("--root must be an absolute path");
+  if (relativePath === undefined) usageError("artifact replace requires --relative <path>");
+  if (inputPath === undefined) usageError("artifact replace requires --input <file>");
+  return { root, relativePath, inputPath };
+}
+
+async function runArtifactReplaceCommand(rest: string[]): Promise<void> {
+  const parsed = artifactReplaceArgs(rest);
+  const bindingResult = await resolveActiveSpace(process.env);
+  if (!bindingResult.ok) {
+    printJson({ schema_version: 0, status: "invalid", errors: bindingResult.errors });
+    process.exit(1);
+  }
+  let content: string;
+  try {
+    content = await readFile(parsed.inputPath, "utf8");
+  } catch (error) {
+    printJson({
+      schema_version: 0,
+      status: "invalid",
+      errors: [`failed to read --input file: ${error instanceof Error ? error.message : String(error)}`],
+    });
+    process.exit(1);
+  }
+  const result = await replaceArtifact(bindingResult.value, {
+    root: parsed.root,
+    relativePath: parsed.relativePath,
+    content,
+  });
+  if (!result.ok) {
+    printJson({ schema_version: 0, status: "invalid", errors: result.errors });
+    process.exit(1);
+  }
+  printJson({ schema_version: 0, status: result.value.status, path: result.value.path });
+  process.exit(0);
+}
+
+async function runArtifactCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  if (subcommand !== "replace") {
+    usageError(`unknown artifact command: ${subcommand ?? "(none)"}`);
+  }
+  await runArtifactReplaceCommand(rest);
+}
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   if (command === "space") {
@@ -709,6 +826,10 @@ async function main(): Promise<void> {
   }
   if (command === "capture-from-turn") {
     await runCaptureFromTurnCommand(rest);
+    return;
+  }
+  if (command === "artifact") {
+    await runArtifactCommand(rest);
     return;
   }
   if (command === "version") {
