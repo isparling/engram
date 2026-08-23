@@ -322,7 +322,7 @@ async function runOneMutation(mutation: Mutation, repoRoot: string): Promise<Mut
   try {
     await writeFile(filePath, source.replace(mutation.find, mutation.replace), "utf8");
     const pattern = buildTestNamePattern(mutation.mustFail);
-    suite = mutation.id === "omp-extension-registers-engram-capture-tool"
+    suite = mutation.file.startsWith("omp/")
       ? runBunTestSuite(harnessRoot(repoRoot), pattern)
       : runTestSuite(harnessRoot(repoRoot), pattern);
   } catch {

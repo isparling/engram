@@ -1,11 +1,15 @@
 import { join } from "node:path";
 import type {
+  JsonObject,
+  KnowledgeEnvelope,
   KnowledgeExtractor,
   KnowledgePack,
+  KnowledgeRecord,
   PresentationPack,
   TurnContext,
   PackHelpers,
 } from "../src/knowledgeTypes.ts";
+import type { ArtifactReplacementResult, HostCapturePreview } from "../src/captureTypes.ts";
 
 /**
  * Minimal KnowledgeExtractor fixture for pack loader tests.
@@ -51,8 +55,50 @@ export const externalDemo: KnowledgePack & PresentationPack & KnowledgeExtractor
   id: "external-demo",
   version: "0.1.0",
   validateEnvelope: () => ({ ok: true, value: undefined }),
-  selectRelatedRecords: (envelope) => ({ mode: "search", query: envelope.statement ?? "external query" }),
-  reconcile: () => ({ ok: true, value: { disposition: "new", summary: "synthetic", mutations: [] } }),
+  selectRelatedRecords: (envelope) => {
+    const target = envelope.details.fixture_target;
+    if (typeof target === "string") {
+      return { mode: "exact", description: `record ${target}`, matches: (record) => record.id === target };
+    }
+    return { mode: "search", query: envelope.statement ?? "external query" };
+  },
+  reconcile: ({ candidate, related }) => {
+    if (candidate.details.fixture_action === "create") {
+      const recordId = typeof candidate.details.fixture_record_id === "string"
+        ? candidate.details.fixture_record_id
+        : `${candidate.id}-record`;
+      const record: KnowledgeRecord = {
+        ...candidate,
+        id: recordId,
+        status: "active",
+        schemaVersion: 0,
+        relationships: { supports: [], contradicts: [], refines: [], supersedes: [] },
+        history: [],
+      };
+      return { ok: true, value: { disposition: "new", summary: "fixture create", mutations: [{ action: "create" as const, record }] } };
+    }
+    const target = related[0];
+    if (target === undefined) {
+      return {
+        ok: false,
+        errors: [{ kind: "plan", code: "fixture_target_missing", message: "fixture update found no related record" }],
+      };
+    }
+    const note = typeof candidate.details.fixture_note === "string" ? candidate.details.fixture_note : "";
+    const priorNotes = target.details.fixture_notes;
+    const updated: KnowledgeRecord = {
+      ...target,
+      details: {
+        ...target.details,
+        fixture_notes: [...(Array.isArray(priorNotes) ? priorNotes : []), note],
+      },
+      history: [
+        ...target.history,
+        { event: "fixture-update", relatedId: candidate.id, submittedAt: candidate.submittedAt },
+      ],
+    };
+    return { ok: true, value: { disposition: candidate.disposition, summary: "fixture update", mutations: [{ action: "update" as const, record: updated }] } };
+  },
   retrievalPolicy: {
     allowedSourceClasses: ["all"],
     queryStrategy: (input) => input.query,
@@ -98,6 +144,90 @@ export async function captureFromTurn(
     await tools.writeFile(join(tools.recordsRoot, "linked", "probe.md"), "probe");
   }
   return { created: ["fixture-draft"], existing: [], invalid: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Structured capture fixture surface: previewStructuredCapture returns the
+// candidate plus a public preview; the host extension must retain the
+// candidate privately and expose only the mutation summary.
+// ---------------------------------------------------------------------------
+
+export function fixtureCandidate(changeSet: JsonObject): KnowledgeEnvelope {
+  const target = changeSet.target;
+  return {
+    id: `structured-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: "claim",
+    status: "candidate",
+    disposition: "new",
+    scope: {
+      space: typeof changeSet.space === "string" ? changeSet.space : "external-fixture-space",
+      subjects: [],
+      topics: ["test:structured"],
+      contexts: [],
+      dimensions: {},
+    },
+    pack: { id: "external-demo", version: "0.1.0" },
+    sources: [{ type: "engram-capture-tool", ref: "structured-change-set" }],
+    session: { id: typeof changeSet.session_id === "string" ? changeSet.session_id : "pending", host: "omp" },
+    submittedAt: new Date().toISOString(),
+    details: {
+      fixture_target: typeof target === "string" ? target : "",
+      fixture_note: typeof changeSet.note === "string" ? changeSet.note : "",
+    },
+    statement: typeof changeSet.note === "string" ? changeSet.note : "structured fixture observation",
+  };
+}
+
+export type FixturePreviewTools = {
+  previewCandidate(candidate: KnowledgeEnvelope): Promise<HostCapturePreview>;
+};
+
+export async function previewStructuredCapture(changeSet: JsonObject, tools: FixturePreviewTools) {
+  const candidate = fixtureCandidate(changeSet);
+  const host = await tools.previewCandidate(candidate);
+  if (host.status === "blocked") return { schemaVersion: 0, status: "blocked" as const, errors: host.errors };
+  return {
+    schemaVersion: 0,
+    status: "ready" as const,
+    planHash: host.planHash,
+    candidate,
+    changes: host.mutations.map((mutation) => ({ recordId: mutation.recordId, action: mutation.action })),
+    artifacts: ["generated/status-view.yaml"],
+  };
+}
+
+export type FixtureMaterializeTools = {
+  listRecords(): Promise<KnowledgeRecord[]>;
+  replaceArtifact(request: { root: string; relativePath: string; content: string }): Promise<ArtifactReplacementResult>;
+  projectRoot: string;
+  appliedAt: string;
+};
+
+let materializeFailuresRemaining = 0;
+
+/** Stage N injected materialization failures for retry testing. */
+export function stageMaterializeFailure(count: number): void {
+  materializeFailuresRemaining = count;
+}
+
+export const materializeInvocations: Array<{ planHash: string }> = [];
+
+export async function materialize(
+  appliedPlan: { planHash: string; mutations: Array<{ recordId: string; action: string }> },
+  tools: FixtureMaterializeTools,
+): Promise<{ written: ArtifactReplacementResult[]; unchanged: ArtifactReplacementResult[]; stale: Array<{ path: string; reason: string }> }> {
+  materializeInvocations.push({ planHash: appliedPlan.planHash });
+  if (materializeFailuresRemaining > 0) {
+    materializeFailuresRemaining -= 1;
+    throw new Error("injected materialization failure");
+  }
+  const records = await tools.listRecords();
+  const written = await tools.replaceArtifact({
+    root: tools.projectRoot,
+    relativePath: "generated/status-view.yaml",
+    content: `# generated from plan ${appliedPlan.planHash} at ${tools.appliedAt} over ${records.length} records\n`,
+  });
+  return { written: [written], unchanged: [], stale: [] };
 }
 export const miskeyedExtractor: KnowledgeExtractor = {
   id: "declared-extractor-a",

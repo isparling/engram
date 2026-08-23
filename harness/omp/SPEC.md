@@ -29,25 +29,47 @@ command; the extension never creates or registers a space.
 
 ## Behavior
 
-The extension registers two tools and one lifecycle hook:
+The extension registers three tools and one lifecycle hook:
 
 - **`session_stop` hook** — takes only the latest user turn from the
   accumulated transcript, builds a `TurnContext`, and delegates capture to the
   pack handler or CLI fallback. This hook is awaited by OMP before final
   settlement.
-- **`engram_capture` tool** — the agent supplies a structured
-  kind/statement/topics envelope, which is written to a temporary file and
-  submitted via `engram knowledge submit`.
-- **`engram_status` tool** — reports the designated extraction pack id/version
-  after session resolution and always reports `mode: "cli"`.
+- **`engram_capture_preview({ change_set })`** — hands the pack-defined
+  `change_set` to the binding-selected pack's `previewStructuredCapture`. The
+  pack builds a candidate envelope and calls back into the host's
+  `previewCandidate`, which runs `engram knowledge reconcile` and returns the
+  authoritative plan. The extension verifies the pack-declared plan hash
+  matches the host's, retains the candidate privately in a
+  session-scoped pending-plan map keyed by that hash, and returns only the
+  plan hash, the mutation summary (`recordId`/`action` pairs), and the sorted
+  artifact paths the pack expects to regenerate. The candidate envelope never
+  appears in the tool result.
+- **`engram_capture_apply({ plan_hash })`** — commits a previously previewed
+  plan. Unknown or session-mismatched hashes are rejected without invoking
+  the CLI. A pending plan is approved via
+  `engram knowledge approve --candidate <file> --expect <plan_hash>` against
+  the exact retained candidate; a stale approval deletes the pending entry
+  and requires a fresh preview. On commit or no-change, the applied mutation
+  view is handed to the pack's `materialize`, which regenerates compatibility
+  views through `listRecords`/`replaceArtifact` host mechanics. If
+  materialization fails, the committed records are retained under
+  `records-committed`; a second apply with the same hash retries only
+  materialization and never re-runs `knowledge approve`.
+- **`engram_status` tool** — reports the designated extraction pack id/version,
+  `mode: "cli"`, the session's pending plan hashes, the last known qmd index
+  state, and any artifacts that failed to regenerate.
 
 ## Reason
 
 The extension owns only host mechanics: settled-turn normalization,
 binding-declared module loading, records-root confinement, create-only writes,
-and scoped qmd refresh. Domain policy — including whether and how observations
-become drafts — lives in the pack. Core transaction, retrieval, and
-presentation behavior remains unchanged.
+scoped qmd refresh, temporary-file confinement for candidates and generated
+artifacts, and plan-hash verification. Domain policy — including whether and
+how observations become drafts, and what a change set means — lives in the
+pack. Core transaction, retrieval, and presentation behavior remains
+unchanged; the adapter never interprets record roles, entity keys, artifact
+kinds, or pack-owned output shape.
 
 ## Out of scope
 

@@ -12,8 +12,8 @@ the extension only bridges the Oh My Pi host session to the engram CLI.
 Two things happen automatically:
 
 1. When a turn ends, the extension extracts knowledge from the turn.
-2. The agent can use the `engram_capture` tool to submit knowledge during a
-   turn.
+2. The agent can use the `engram_capture_preview` and `engram_capture_apply`
+   tools to propose and commit a hash-bound record mutation during a turn.
 
 ## Requirements
 
@@ -66,7 +66,8 @@ omp --extension ./node_modules/@isparling/engram-omp/omp-extension.ts
 
 1. Start Oh My Pi with the extension.
 2. Look for log messages from `[engram]` in the Oh My Pi output.
-3. The agent can use the `engram_capture` tool.
+3. The agent can use the `engram_capture_preview`, `engram_capture_apply`, and
+   `engram_status` tools.
 4. The agent can also see extracted knowledge after each turn.
 
 ## How the Extension Works
@@ -84,25 +85,33 @@ When a main-session turn settles, the extension:
 6. Falls back to `engram capture-from-turn` only when the pack exports no
    handler.
 
-### The `engram_capture` Tool
+### The Structured Capture Tools
 
-The agent can use the `engram_capture` tool during a turn.
+Explicit capture is hash-bound and always two steps. The extension supplies
+host mechanics only; the binding-selected pack owns every domain decision.
 
-The tool accepts these parameters:
+`engram_capture_preview` takes a single `change_set` object. The extension
+passes it to the pack's `previewStructuredCapture`, reconciles the resulting
+candidate through the engram CLI, and returns the mutation plan:
 
-| Parameter | Required | Values |
-|-----------|----------|--------|
-| `kind` | Yes | `evidence`, `claim`, `interpretation`, `decision`, `recommendation` |
-| `statement` | Yes | Free-form text |
-| `scope_topics` | No | Array of topic tags |
-| `subjects` | No | Array of subject identifiers |
+| Field | Meaning |
+|-------|---------|
+| `plan_hash` | Exact hash the user approves and `engram_capture_apply` requires |
+| `changes` | Records the plan will create or update |
+| `artifacts` | Compatibility views the plan will regenerate |
 
-The tool:
+The candidate envelope itself is retained privately by the extension and is
+never returned to the agent.
 
-1. Builds a knowledge envelope.
-2. Writes a temporary file.
-3. Calls the engram CLI with `knowledge submit`.
-4. Returns the result to the agent.
+`engram_capture_apply` takes only `plan_hash`. It refuses an unknown or
+session-mismatched hash without calling the CLI, and returns `stale` when the
+underlying records changed after preview — which requires a fresh preview and
+a fresh approval. On success it commits the records, refreshes the scoped qmd
+index, invokes the pack's `materialize`, and reports the created and retired
+record ids, applied entity keys, generated artifacts, and index state.
+
+`engram_status` reports the active pack id and version, mode, pending plan
+hashes for the current session, index state, and stale artifacts.
 
 ## Troubleshooting
 
@@ -112,7 +121,7 @@ The tool:
 - Check that Oh My Pi can resolve the extension path.
 - Check that `ENGRAM_BINDING_REGISTRY` is set.
 
-**The `engram_capture` tool returns an error.**
+**A capture tool returns an error.**
 
 - Check that the engram CLI is installed.
 - Check that the binding registry has a valid space.

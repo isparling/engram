@@ -10,7 +10,8 @@
     "target": "es2023",
     "types": ["node", "bun"],
     "paths": {
-      "@isparling/engram-harness/knowledge-types": ["./src/knowledgeTypes.ts"]
+      "@isparling/engram-harness/knowledge-types": ["./src/knowledgeTypes.ts"],
+      "@isparling/engram-harness/capture-types": ["./src/captureTypes.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "omp/**/*.ts", "mutations.ts", "../release/**/*.ts"]

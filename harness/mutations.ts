@@ -1071,12 +1071,12 @@ export const mutations: Mutation[] = [
     mustFail: ["property: release artifacts and manager output contain no neighboring runtime state — manager projection"],
   },
   {
-    id: "omp-extension-registers-engram-capture-tool",
-    property: "if the registerTool call for engram_capture in omp-extension.ts is disabled, the test's result.status assert at omp/ompExtension.check.ts:170 fails",
+    id: "omp-extension-registers-capture-preview-tool",
+    property: "if the registerTool call for engram_capture_preview in omp-extension.ts is disabled, explicit capture loses its preview tool and the check test \"preview returns mutation summary without exposing the candidate; apply commits the same hash\" fails because the tool was never registered",
     file: "omp/omp-extension.ts",
-    find: "api.registerTool({\n    name: \"engram_capture\",",
-    replace: "if (false) api.registerTool({\n    name: \"engram_capture\",",
-    mustFail: ["ompExtension property: engram_capture tool resolves external pack via from rather than pack_unknown"],
+    find: "api.registerTool({\n    name: \"engram_capture_preview\",",
+    replace: "if (false) api.registerTool({\n    name: \"engram_capture_preview\",",
+    mustFail: ["preview returns mutation summary without exposing the candidate"],
   },
 ];
 

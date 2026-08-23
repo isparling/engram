@@ -254,7 +254,7 @@ entries by the source file they pin.
 | `release-clean-source-required` | Release candidate construction refuses every tracked or untracked source change before staging, so copied bytes remain attributable to the recorded commit. |
 
 ## omp/omp-extension.ts
-| `omp-extension-registers-engram-capture-tool` | if the registerTool call for engram_capture in omp-extension.ts is disabled, the test's result.status assert at omp/ompExtension.check.ts:170 fails |
+| `omp-extension-registers-capture-preview-tool` | Disabling the `engram_capture_preview` registration in omp-extension.ts leaves explicit capture without its preview tool; the check test "preview returns mutation summary without exposing the candidate; apply commits the same hash" fails because `callJsonTool` asserts the tool was registered. |
 
 ## Notes on individual entries
 

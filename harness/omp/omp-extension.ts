@@ -1,9 +1,11 @@
 /**
  * Oh My Pi extension for engram knowledge capture.
  *
- * Hooks into the agent lifecycle to extract structured knowledge candidates
- * from settled turns, and registers a voluntary `engram_capture` tool for
- * mid-turn capture.
+ * Hooks into the agent lifecycle to extract ambient knowledge candidates
+ * from settled turns, and registers two typed, hash-bound capture tools:
+ *
+ *   engram_capture_preview({ change_set })
+ *   engram_capture_apply({ plan_hash })
  *
  * ## Installation
  *
@@ -18,8 +20,10 @@
  * Environment variables read at session start:
  *
  *   ENGRAM_BINDING_REGISTRY  (required)  path to the engram binding registry
- *   ENGRAM_CLI              (optional)  path to engram CLI binary (default: "engram")
- *   ENGRAM_SPACE_ID         (optional)  override nearest engram.space.json
+ *   ENGRAM_CLI               (optional)  path to engram CLI binary (default: "engram")
+ *   ENGRAM_SPACE_ID          (optional)  override nearest engram.space.json
+ *   ENGRAM_PROJECT_ROOT      (optional)  artifact root handed to pack
+ *                                        materializers (default: process cwd)
  *
  * ## Design
  *
@@ -31,9 +35,16 @@
  *                        pack owns draft policy; the extension confines writes
  *                        to recordsRoot and refreshes scoped qmd. Packs without
  *                        the handler fall back to `engram capture-from-turn`.
- *   Tool (engram_capture): agent provides structured kind/statement/topics →
- *                          builds KnowledgeEnvelopeInput → writes to temp
- *                          file → calls `engram knowledge submit`.
+ *   Tools (explicit capture): the agent supplies a structured change set →
+ *                        the pack's previewStructuredCapture builds the
+ *                        candidate and calls back into the host's
+ *                        `engram knowledge reconcile`; the extension stores
+ *                        the resulting plan hash plus the candidate privately.
+ *                        Approval runs `engram knowledge approve --expect
+ *                        <plan-hash>` against that exact candidate, then hands
+ *                        the applied mutation view to the pack's materialize.
+ *                        The candidate envelope never appears in any tool
+ *                        result; only the mutation summary does.
  *
  * The extension owns only OMP lifecycle and host mechanics. Capture policy
  * remains external-pack code; core transaction behavior stays unchanged.
@@ -45,7 +56,20 @@ import { chmod, mkdtemp, open, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { HostSessionProvenance, TurnContext, TurnToolCall } from "@isparling/engram-harness/knowledge-types";
+import type {
+  ArtifactReplacementResult,
+  CaptureMutationView,
+  HostCapturePreview,
+} from "@isparling/engram-harness/capture-types";
+import type {
+  HostSessionProvenance,
+  JsonValue,
+  KnowledgeEnvelope,
+  KnowledgeError,
+  KnowledgeRecord,
+  TurnContext,
+  TurnToolCall,
+} from "@isparling/engram-harness/knowledge-types";
 
 // ---------------------------------------------------------------------------
 // ExtensionAPI types — mirrors the real omp type from
@@ -83,6 +107,7 @@ export interface ToolDefinition {
   parameters: unknown;
   execute: (params: Record<string, unknown>) => Promise<ToolResult>;
 }
+
 export type CaptureTools = {
   recordsRoot: string;
   spaceId: string;
@@ -100,10 +125,72 @@ export type CaptureHandler = (
   turn: TurnContext,
   tools: CaptureTools,
 ) => Promise<CaptureSummary>;
+
+/** Host mechanics handed to a pack's previewStructuredCapture. */
+export type StructuredPreviewTools = {
+  previewCandidate(candidate: KnowledgeEnvelope): Promise<HostCapturePreview>;
+};
+
+/** Host mechanics handed to a pack's materialize. */
+export type StructuredMaterializeTools = {
+  listRecords(): Promise<KnowledgeRecord[]>;
+  replaceArtifact(request: {
+    root: string;
+    relativePath: string;
+    content: string;
+  }): Promise<ArtifactReplacementResult>;
+  projectRoot: string;
+  appliedAt: string;
+};
+
+export type PackStructuredPreview = (
+  changeSet: { [key: string]: JsonValue },
+  tools: StructuredPreviewTools,
+) => Promise<unknown>;
+
+export type PackMaterialize = (
+  appliedPlan: { planHash: string; mutations: CaptureMutationView[] },
+  tools: StructuredMaterializeTools,
+) => Promise<unknown>;
+
+/**
+ * Resolution of the binding-selected pack module. Pack identity is validated
+ * once; each capture export is recorded independently and stays optional.
+ * A pack selected with `extract: true` is valid when it exports
+ * `captureFromTurn` — its root pack object need not implement
+ * `KnowledgeExtractor.extractCandidates`.
+ */
 export type CaptureResolution =
-  | { kind: "available"; handler: CaptureHandler }
+  | {
+      kind: "available";
+      captureFromTurn: CaptureHandler;
+      previewStructuredCapture?: PackStructuredPreview;
+      materialize?: PackMaterialize;
+    }
   | { kind: "absent" }
   | { kind: "failed"; message: string };
+
+/**
+ * A pending explicit-capture plan keyed by its immutable plan hash.
+ *
+ * State machine:
+ *   previewed         → apply committed/no-change → records-committed
+ *   previewed         → apply stale              → (entry deleted; fresh
+ *                                                  preview required)
+ *   records-committed → apply (same hash) reruns ONLY materialize → deleted
+ */
+type PendingCapture = {
+  sessionId: string;
+  candidate: KnowledgeEnvelope;
+  preview: Extract<HostCapturePreview, { status: "ready" }>;
+  state: "previewed" | "records-committed";
+  appliedPlan?: { planHash: string; mutations: CaptureMutationView[] };
+  /** One captured apply timestamp, reused verbatim across materialize retries. */
+  appliedAt?: string;
+  appliedStatus?: "committed" | "no-change";
+  indexState: "fresh" | "stale" | "not-attempted";
+};
+
 function stopTurnKey(event: SessionStopEvent): string {
   for (let index = event.messages.length - 1; index >= 0; index -= 1) {
     const message = event.messages[index];
@@ -165,6 +252,252 @@ async function nativePackageSpecifier(specifier: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// JSON narrowing helpers
+// ---------------------------------------------------------------------------
+
+function isJsonObject(value: unknown): value is { [key: string]: unknown } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseKnowledgeError(value: unknown): KnowledgeError | undefined {
+  if (!isJsonObject(value)) return undefined;
+  if (typeof value.code !== "string" || typeof value.message !== "string") return undefined;
+  return {
+    kind: typeof value.kind === "string" ? value.kind as KnowledgeError["kind"] : "validation",
+    code: value.code,
+    ...(typeof value.field === "string" ? { field: value.field } : {}),
+    message: value.message,
+  };
+}
+
+function parseKnowledgeErrors(value: unknown): KnowledgeError[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const errors: KnowledgeError[] = [];
+  for (const item of value) {
+    const parsed = parseKnowledgeError(item);
+    if (parsed === undefined) return undefined;
+    errors.push(parsed);
+  }
+  return errors;
+}
+
+/** The public shape a pack's previewStructuredCapture must return when ready. */
+type PackPreviewReady = {
+  schemaVersion: 0;
+  status: "ready";
+  planHash: string;
+  candidate: KnowledgeEnvelope;
+  changes: Array<{ recordId: string; action: "create" | "update" }>;
+  artifacts: string[];
+};
+
+function parsePackPreview(
+  value: unknown,
+): PackPreviewReady | { status: "blocked"; errors: KnowledgeError[] } | undefined {
+  if (!isJsonObject(value) || value.schemaVersion !== 0) return undefined;
+  if (value.status === "blocked") {
+    const errors = parseKnowledgeErrors(value.errors);
+    return errors === undefined ? undefined : { status: "blocked", errors };
+  }
+  if (value.status !== "ready") return undefined;
+  if (typeof value.planHash !== "string" || value.planHash.length === 0) return undefined;
+  if (!isJsonObject(value.candidate) || typeof value.candidate.id !== "string") return undefined;
+  if (!Array.isArray(value.changes) || !Array.isArray(value.artifacts)) return undefined;
+  const changes: PackPreviewReady["changes"] = [];
+  for (const change of value.changes) {
+    if (!isJsonObject(change)) return undefined;
+    if (typeof change.recordId !== "string") return undefined;
+    if (change.action !== "create" && change.action !== "update") return undefined;
+    changes.push({ recordId: change.recordId, action: change.action });
+  }
+  const artifacts: string[] = [];
+  for (const artifact of value.artifacts) {
+    if (typeof artifact !== "string" || artifact.length === 0) return undefined;
+    artifacts.push(artifact);
+  }
+  return {
+    schemaVersion: 0,
+    status: "ready",
+    planHash: value.planHash,
+    candidate: value.candidate as KnowledgeEnvelope,
+    changes,
+    artifacts,
+  };
+}
+
+/** Serialized planned-mutation shape printed by the knowledge CLI. */
+type CliPlannedMutation = {
+  recordId: unknown;
+  action: unknown;
+  beforeHash: unknown;
+  after: unknown;
+};
+
+function parseCliMutations(value: unknown): CaptureMutationView[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const mutations: CaptureMutationView[] = [];
+  for (const raw of value) {
+    if (!isJsonObject(raw)) return undefined;
+    const source = raw as unknown as CliPlannedMutation;
+    if (typeof source.recordId !== "string") return undefined;
+    if (source.action !== "create" && source.action !== "update") return undefined;
+    if (source.beforeHash !== null && typeof source.beforeHash !== "string") return undefined;
+    if (!isJsonObject(source.after)) return undefined;
+    const after = parseKnowledgeRecordShape(source.after);
+    if (after === undefined) return undefined;
+    mutations.push({
+      recordId: source.recordId,
+      action: source.action,
+      beforeHash: source.beforeHash,
+      after,
+    });
+  }
+  return mutations;
+}
+
+/** Structural validation of a CLI-reported knowledge record. */
+function parseKnowledgeRecordShape(value: { [key: string]: unknown }): KnowledgeRecord | undefined {
+  if (
+    typeof value.id !== "string" ||
+    typeof value.kind !== "string" ||
+    typeof value.status !== "string" ||
+    typeof value.statement !== "string" ||
+    !isJsonObject(value.details) ||
+    !isJsonObject(value.scope) ||
+    !isJsonObject(value.pack) ||
+    !Array.isArray(value.sources) ||
+    !isJsonObject(value.session) ||
+    typeof value.submittedAt !== "string" ||
+    typeof value.disposition !== "string" ||
+    value.schemaVersion !== 0 ||
+    !isJsonObject(value.relationships) ||
+    !Array.isArray(value.history)
+  ) {
+    return undefined;
+  }
+  const scope = value.scope as unknown as KnowledgeRecord["scope"];
+  if (!Array.isArray(scope.subjects) || !Array.isArray(scope.topics)) return undefined;
+  const relationships = value.relationships as unknown as KnowledgeRecord["relationships"];
+  for (const key of ["supports", "contradicts", "refines", "supersedes"] as const) {
+    if (!Array.isArray(relationships[key])) return undefined;
+  }
+  return value as unknown as KnowledgeRecord;
+}
+
+type CliApplyCommitted = {
+  status: "committed" | "no_change";
+  mutations: CaptureMutationView[];
+  index: "fresh" | "stale" | "not-attempted";
+};
+
+function mapRefreshIndex(refresh: unknown): "fresh" | "stale" | "not-attempted" {
+  if (!isJsonObject(refresh) || refresh.attempted !== true) return "not-attempted";
+  return refresh.state === "fresh" ? "fresh" : "stale";
+}
+
+function parseCliApplyOutcome(stdout: string): CliApplyCommitted | { status: "stale_approval" } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!isJsonObject(parsed)) return undefined;
+  if (parsed.status === "stale_approval") return { status: "stale_approval" };
+  if (parsed.status !== "committed" && parsed.status !== "no_change") return undefined;
+  const mutations = parseCliMutations(parsed.mutations);
+  if (mutations === undefined) return undefined;
+  return { status: parsed.status, mutations, index: mapRefreshIndex(parsed.refresh) };
+}
+
+function parseArtifactReplacement(stdout: string): ArtifactReplacementResult | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!isJsonObject(parsed)) return undefined;
+  if ((parsed.status !== "replaced" && parsed.status !== "unchanged") || typeof parsed.path !== "string") {
+    return undefined;
+  }
+  return { status: parsed.status, path: parsed.path };
+}
+
+function parseListedRecords(stdout: string): KnowledgeRecord[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!isJsonObject(parsed) || parsed.status !== "ok" || !Array.isArray(parsed.records)) return undefined;
+  const records: KnowledgeRecord[] = [];
+  for (const raw of parsed.records) {
+    if (!isJsonObject(raw)) return undefined;
+    const record = parseKnowledgeRecordShape(raw);
+    if (record === undefined) return undefined;
+    records.push(record);
+  }
+  return records;
+}
+
+/** Mechanical mutation summary: no domain interpretation beyond field reads. */
+function summarizeMutations(mutations: CaptureMutationView[]): {
+  created: string[];
+  retired: string[];
+  entityKeys: string[];
+} {
+  const created: string[] = [];
+  const retired = new Set<string>();
+  const entityKeys = new Set<string>();
+  for (const mutation of mutations) {
+    if (mutation.action === "create") created.push(mutation.recordId);
+    const supersedes = mutation.after.relationships.supersedes;
+    for (const id of Array.isArray(supersedes) ? supersedes : []) {
+      if (typeof id === "string" && !created.includes(id)) retired.add(id);
+    }
+    const entityKey = mutation.after.details.entityKey;
+    if (typeof entityKey === "string") entityKeys.add(entityKey);
+  }
+  return {
+    created,
+    retired: [...retired].sort(),
+    entityKeys: [...entityKeys].sort(),
+  };
+}
+
+type MaterializationOutcome = {
+  written: ArtifactReplacementResult[];
+  unchanged: ArtifactReplacementResult[];
+  stale: Array<{ path: string; reason: string }>;
+};
+
+function normalizeMaterialization(value: unknown): MaterializationOutcome {
+  const empty: MaterializationOutcome = { written: [], unchanged: [], stale: [] };
+  if (!isJsonObject(value)) return empty;
+  const results = (raw: unknown): ArtifactReplacementResult[] => {
+    if (!Array.isArray(raw)) return [];
+    const out: ArtifactReplacementResult[] = [];
+    for (const item of raw) {
+      if (!isJsonObject(item)) continue;
+      if ((item.status !== "replaced" && item.status !== "unchanged") || typeof item.path !== "string") continue;
+      out.push({ status: item.status, path: item.path });
+    }
+    return out;
+  };
+  const stale: Array<{ path: string; reason: string }> = [];
+  if (Array.isArray(value.stale)) {
+    for (const item of value.stale) {
+      if (!isJsonObject(item)) continue;
+      if (typeof item.path !== "string" || typeof item.reason !== "string") continue;
+      stale.push({ path: item.path, reason: item.reason });
+    }
+  }
+  return { written: results(value.written), unchanged: results(value.unchanged), stale };
+}
+
+// ---------------------------------------------------------------------------
 // CLI format helpers
 // ---------------------------------------------------------------------------
 
@@ -187,6 +520,46 @@ function toCliCandidate(input: object): Record<string, unknown> {
     ? String(rawDate).slice(0, 10)
     : new Date().toISOString().slice(0, 10);
   return out;
+}
+
+/**
+ * Write one candidate envelope to a fresh mode-0600 file inside a mode-0700
+ * temporary directory, hand the file path to the caller, and always remove
+ * the directory afterwards.
+ */
+async function withTempCandidate<T>(candidate: object, fn: (file: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), "engram-candidate-"));
+  try {
+    await chmod(dir, 0o700);
+    const file = join(dir, "candidate.json");
+    const handle = await open(file, "wx", 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(toCliCandidate(candidate)), "utf8");
+    } finally {
+      await handle.close();
+    }
+    return await fn(file);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** Same confinement for arbitrary generated-artifact content. */
+async function withTempContent<T>(content: string, fn: (file: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), "engram-artifact-"));
+  try {
+    await chmod(dir, 0o700);
+    const file = join(dir, "artifact.content");
+    const handle = await open(file, "wx", 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+    } finally {
+      await handle.close();
+    }
+    return await fn(file);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +676,11 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
   let resolvedPackId = false;
   let lastCapturedTurnKey: string | undefined;
 
+  // Explicit-capture session state.
+  const pendingPlans = new Map<string, PendingCapture>();
+  let lastIndexState: "fresh" | "stale" | "not-attempted" = "not-attempted";
+  const sessionStaleArtifacts: string[] = [];
+
   function resetSessionResolution(): void {
     extractionPackId = "work-pack";
     extractionPackVersion = "0.1.0";
@@ -312,6 +690,9 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
     captureResolution = undefined;
     resolvedPackId = false;
     lastCapturedTurnKey = undefined;
+    pendingPlans.clear();
+    lastIndexState = "not-attempted";
+    sessionStaleArtifacts.length = 0;
   }
 
   async function bindingPathForActiveSpace(): Promise<string> {
@@ -366,7 +747,14 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
     }
   }
 
-  async function resolveCaptureHandler(): Promise<CaptureResolution> {
+  /**
+   * Resolve the complete capture module surface once per session: pack
+   * identity is validated exactly once, and the optional captureFromTurn /
+   * previewStructuredCapture / materialize exports are recorded independently.
+   * A pack selected with `extract: true` is valid when it exports
+   * captureFromTurn; its root pack object need not implement extractCandidates.
+   */
+  async function resolveCaptureModule(): Promise<CaptureResolution> {
     if (captureResolution !== undefined) return captureResolution;
     try {
       const specifier = await packModuleSpecifier();
@@ -374,19 +762,26 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
       // an external pack declaration.
       const module = await import(specifier) as Record<string, unknown>;
       const selected = packExport(module, extractionPackId);
-      if (
-        typeof selected !== "object" ||
-        selected === null ||
-        Array.isArray(selected) ||
-        (selected as Record<string, unknown>).id !== extractionPackId ||
-        (selected as Record<string, unknown>).version !== extractionPackVersion ||
-        typeof (selected as Record<string, unknown>).extractCandidates !== "function"
-      ) {
-        captureResolution = { kind: "failed", message: "pack export identity or extractor surface does not match the active binding" };
-      } else if (typeof module.captureFromTurn === "function") {
-        captureResolution = { kind: "available", handler: module.captureFromTurn as CaptureHandler };
-      } else {
+      const identityMatches = typeof selected === "object" &&
+        selected !== null &&
+        !Array.isArray(selected) &&
+        (selected as Record<string, unknown>).id === extractionPackId &&
+        (selected as Record<string, unknown>).version === extractionPackVersion;
+      if (!identityMatches) {
+        captureResolution = { kind: "failed", message: "pack export identity does not match the active binding" };
+      } else if (typeof module.captureFromTurn !== "function") {
         captureResolution = { kind: "absent" };
+      } else {
+        captureResolution = {
+          kind: "available",
+          captureFromTurn: module.captureFromTurn as CaptureHandler,
+          ...(typeof module.previewStructuredCapture === "function"
+            ? { previewStructuredCapture: module.previewStructuredCapture as PackStructuredPreview }
+            : {}),
+          ...(typeof module.materialize === "function"
+            ? { materialize: module.materialize as PackMaterialize }
+            : {}),
+        };
       }
     } catch (error) {
       captureResolution = { kind: "failed", message: String(error) };
@@ -436,6 +831,109 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
     };
   }
 
+  async function runCli(
+    args: string[],
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const proc = Bun.spawn([cliPath, ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: cliEnv(),
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const exitCode = await proc.exited;
+    return {
+      exitCode,
+      stdout: await new Response(proc.stdout).text(),
+      stderr: await new Response(proc.stderr).text(),
+    };
+  }
+
+  /**
+   * Host preview mechanics: write the candidate to a protected temporary
+   * file, run `engram knowledge reconcile --candidate <file>`, and map the
+   * proposal into a HostCapturePreview. Every invalid/retrieval failure maps
+   * to status "blocked". The temporary directory is removed in finally.
+   */
+  async function previewCandidate(candidate: KnowledgeEnvelope): Promise<HostCapturePreview> {
+    return withTempCandidate(candidate, async (file) => {
+      const outcome = await runCli(["knowledge", "reconcile", "--candidate", file]);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(outcome.stdout);
+      } catch {
+        parsed = undefined;
+      }
+      if (outcome.exitCode === 0 && isJsonObject(parsed) && parsed.status === "proposal" && isJsonObject(parsed.proposal)) {
+        const proposal = parsed.proposal as { [key: string]: unknown };
+        const plan = isJsonObject(proposal.plan) ? proposal.plan as { [key: string]: unknown } : undefined;
+        const mutations = plan === undefined ? undefined : parseCliMutations(plan.mutations);
+        if (typeof proposal.plan_hash === "string" && mutations !== undefined) {
+          return {
+            schemaVersion: 0,
+            status: "ready",
+            planHash: proposal.plan_hash,
+            mutations,
+          };
+        }
+      }
+      const errors = isJsonObject(parsed) ? parseKnowledgeErrors(parsed.errors) : undefined;
+      return {
+        schemaVersion: 0,
+        status: "blocked",
+        errors: errors ?? [{
+          kind: "transaction",
+          code: "reconcile_failed",
+          message: `engram knowledge reconcile failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
+        }],
+      };
+    });
+  }
+
+  /**
+   * Materialization host mechanics. The adapter never interprets record
+   * roles, entity keys, artifact kinds, or output shape: it validates CLI
+   * responses structurally and forwards them verbatim.
+   */
+  function materializeTools(entry: PendingCapture): StructuredMaterializeTools {
+    return {
+      projectRoot: process.env.ENGRAM_PROJECT_ROOT !== undefined && process.env.ENGRAM_PROJECT_ROOT.length > 0
+        ? process.env.ENGRAM_PROJECT_ROOT
+        : process.cwd(),
+      appliedAt: (entry.appliedAt ??= new Date().toISOString()),
+      listRecords: async () => {
+        const outcome = await runCli(["knowledge", "list", "--pack", extractionPackId, "--status", "active"]);
+        const records = parseListedRecords(outcome.stdout);
+        if (outcome.exitCode !== 0 || records === undefined) {
+          throw new Error(
+            `engram knowledge list failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
+          );
+        }
+        return records;
+      },
+      replaceArtifact: async (request) =>
+        withTempContent(request.content, async (file) => {
+          const outcome = await runCli([
+            "artifact",
+            "replace",
+            "--root",
+            request.root,
+            "--relative",
+            request.relativePath,
+            "--input",
+            file,
+          ]);
+          const mapped = parseArtifactReplacement(outcome.stdout);
+          if (outcome.exitCode !== 0 || mapped === undefined) {
+            throw new Error(
+              `engram artifact replace failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
+            );
+          }
+          return mapped;
+        }),
+    };
+  }
+
 
   // -----------------------------------------------------------------------
   // Structural capture: awaited final-settle hook
@@ -465,14 +963,14 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
 
     const turn = buildTurnContext(event);
     if (turn === undefined) return;
-    const resolution = await resolveCaptureHandler();
+    const resolution = await resolveCaptureModule();
     if (resolution.kind === "failed") {
       api.logger.warn(`[engram] failed to load pack capture handler: ${resolution.message}`);
       return;
     }
     if (resolution.kind === "available") {
       try {
-        const summary = await resolution.handler(turn, await captureTools(event.signal));
+        const summary = await resolution.captureFromTurn(turn, await captureTools(event.signal));
         if (event.signal.aborted) return;
         api.logger.info(
           `[engram] capture: ${summary.created.length} draft(s), ` +
@@ -485,7 +983,8 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
       return;
     }
 
-    // A successfully loaded pack without a handler retains the generic CLI path.
+    // A successfully loaded pack without a captureFromTurn handler retains
+    // the generic CLI path.
     try {
       const proc = Bun.spawn([cliPath, "capture-from-turn"], {
         stdin: "pipe",
@@ -510,93 +1009,233 @@ export default async function engramExtension(api: ExtensionAPI): Promise<void> 
   });
 
   // -----------------------------------------------------------------------
-  // Status tool: report loaded pack and mode
+  // Status tool: report loaded pack, mode, and pending capture state
   // -----------------------------------------------------------------------
   api.registerTool({
     name: "engram_status",
-    description: "Report the binding-selected pack identity and CLI mode.",
+    description: "Report the binding-selected pack identity, CLI mode, and pending capture state.",
     parameters: { type: "object", properties: {} },
     execute: async () => toolText({
       pack_id: resolvedPackId ? extractionPackId : null,
       pack_version: resolvedPackId ? extractionPackVersion : null,
       mode: "cli",
+      pending_plan_hashes: hostSessionId === undefined
+        ? []
+        : [...pendingPlans.entries()]
+            .filter(([, entry]) => entry.sessionId === hostSessionId)
+            .map(([hash]) => hash),
+      index_state: lastIndexState,
+      stale_artifacts: [...sessionStaleArtifacts],
     }),
   });
 
   // -----------------------------------------------------------------------
-  // Voluntary capture: engram_capture tool
+  // Explicit capture: engram_capture_preview
   // -----------------------------------------------------------------------
   api.registerTool({
-    name: "engram_capture",
-    description: `Submit a structured knowledge observation from the current session.
-Use this to record decisions, outcomes, risks, or notable events mid-turn
-rather than waiting for end-of-turn extraction. Bypasses the pack's
-extraction pipeline — the agent provides the classification directly.
+    name: "engram_capture_preview",
+    description: `Preview a structured knowledge capture against the active engram space.
+The binding-selected pack turns your change set into candidate records, the
+host reconciles them authoritatively, and you receive the exact mutation plan
+bound to an immutable plan hash. Apply that hash with engram_capture_apply.
 
 Parameters:
-- kind: one of "evidence", "claim", "interpretation", "decision", "recommendation"
-- statement: free-form description of the observation
-- scope_topics: array of topic tags (e.g. ["work:decision", "work:architecture"])
-- subjects: array of subject identifiers (optional)`,
+- change_set: pack-defined JSON object describing what to capture.`,
     parameters: {
       type: "object",
       properties: {
-        kind: { type: "string", enum: ["evidence", "claim", "interpretation", "decision", "recommendation"] },
-        statement: { type: "string", minLength: 1 },
-        scope_topics: { type: "array", items: { type: "string" }, default: [] },
-        subjects: { type: "array", items: { type: "string" }, default: [] },
+        change_set: { type: "object" },
       },
-      required: ["kind", "statement"],
+      required: ["change_set"],
+      additionalProperties: false,
     },
     execute: async (params: Record<string, unknown>) => {
-      const id = `capture-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const envelope = {
-        id,
-        kind: String(params.kind ?? "claim"),
-        status: "candidate" as const,
-        disposition: "new" as const,
-        scope: {
-          space: extractionSpaceId,
-          subjects: Array.isArray(params.subjects) ? params.subjects.map(String) : [],
-          topics: Array.isArray(params.scope_topics) ? params.scope_topics.map(String) : [],
-          contexts: [] as string[],
-          dimensions: {} as Record<string, string[]>,
-        },
-        pack: { id: extractionPackId, version: extractionPackVersion },
-        sources: [{ type: "engram-capture-tool" as const, ref: `session:${registryPath}` }],
-        session: { id: hostSessionId ?? "pending", host: "omp" as const },
-        submittedAt: new Date().toISOString(),
-        details: {} as Record<string, unknown>,
-        statement: String(params.statement ?? ""),
-      };
-
-
-      const cliCandidate = toCliCandidate(envelope);
-      let candidateDir: string | undefined;
       try {
-        candidateDir = await mkdtemp(join(tmpdir(), "engram-candidate-"));
-        await chmod(candidateDir, 0o700);
-        const tmpFile = join(candidateDir, "candidate.json");
-        const file = await open(tmpFile, "wx", 0o600);
-        try {
-          await file.writeFile(JSON.stringify(cliCandidate), "utf8");
-        } finally {
-          await file.close();
+        if (hostSessionId === undefined) {
+          return toolText({ status: "error", errors: ["no active engram session; settle a turn first"] });
         }
-        const proc = Bun.spawn([cliPath, "knowledge", "submit", "--candidate", tmpFile], {
-          stdout: "pipe",
-          stderr: "pipe",
-          env: cliEnv(),
+        const changeSet = params.change_set;
+        if (changeSet === undefined || changeSet === null || typeof changeSet !== "object" || Array.isArray(changeSet)) {
+          return toolText({ status: "error", errors: ["change_set must be a JSON object"] });
+        }
+        const resolution = await resolveCaptureModule();
+        if (resolution.kind === "failed") {
+          return toolText({ status: "error", errors: [`pack load failed: ${resolution.message}`] });
+        }
+        if (resolution.kind === "absent" || resolution.previewStructuredCapture === undefined) {
+          return toolText({ status: "error", errors: ["the binding-selected pack does not expose previewStructuredCapture"] });
+        }
+
+        // The host preview happens inside the pack callback; capture it so the
+        // pack-declared hash can be verified against the authoritative one.
+        let hostPreview: HostCapturePreview | undefined;
+        const packResult = await resolution.previewStructuredCapture(
+          changeSet as { [key: string]: JsonValue },
+          {
+            previewCandidate: async (candidate) => {
+              hostPreview = await previewCandidate(candidate);
+              return hostPreview;
+            },
+          },
+        );
+        const parsed = parsePackPreview(packResult);
+        if (parsed === undefined) {
+          return toolText({ status: "error", errors: ["pack returned a malformed structured capture preview"] });
+        }
+        if (parsed.status === "blocked") {
+          return toolText({ status: "blocked", errors: parsed.errors });
+        }
+        if (hostPreview === undefined || hostPreview.status !== "ready") {
+          return toolText({ status: "error", errors: ["pack declared a ready preview without a successful host reconcile"] });
+        }
+        if (parsed.planHash !== hostPreview.planHash) {
+          return toolText({
+            status: "error",
+            errors: [
+              `plan hash mismatch: pack declared ${parsed.planHash} but the host reconciled ${hostPreview.planHash}`,
+            ],
+          });
+        }
+        pendingPlans.set(parsed.planHash, {
+          sessionId: hostSessionId,
+          candidate: parsed.candidate,
+          preview: hostPreview,
+          state: "previewed",
+          indexState: "not-attempted",
         });
-        const exitCode = await proc.exited;
-        const stdout = await new Response(proc.stdout).text();
-        const stderr = await new Response(proc.stderr).text();
-        if (exitCode === 0) return toolText({ status: "submitted", detail: stdout, id });
-        return toolText({ status: "error", detail: (stdout || stderr).slice(0, 1000), id });
+        return toolText({
+          plan_hash: parsed.planHash,
+          changes: parsed.changes,
+          artifacts: [...parsed.artifacts].sort(),
+        });
       } catch (error) {
-        return toolText({ status: "error", detail: String(error).slice(0, 1000), id });
-      } finally {
-        if (candidateDir !== undefined) await rm(candidateDir, { recursive: true, force: true });
+        return toolText({ status: "error", errors: [String(error instanceof Error ? error.message : error)] });
+      }
+    },
+  });
+
+  // -----------------------------------------------------------------------
+  // Explicit capture: engram_capture_apply
+  // -----------------------------------------------------------------------
+  api.registerTool({
+    name: "engram_capture_apply",
+    description: `Commit a previously previewed engram capture plan by its exact plan hash.
+If the underlying records changed since the preview, the apply is refused as
+stale and a fresh preview/approval round is required. After records commit,
+the pack regenerates compatibility views; if that fails the commit stands and
+a second apply with the same hash retries only view regeneration.`,
+    parameters: {
+      type: "object",
+      properties: {
+        plan_hash: { type: "string", minLength: 1 },
+      },
+      required: ["plan_hash"],
+      additionalProperties: false,
+    },
+    execute: async (params: Record<string, unknown>) => {
+      try {
+        if (hostSessionId === undefined) {
+          return toolText({ status: "error", errors: ["no active engram session; settle a turn first"] });
+        }
+        const planHash = params.plan_hash;
+        if (typeof planHash !== "string" || planHash.length === 0) {
+          return toolText({ status: "error", errors: ["plan_hash must be a non-empty string"] });
+        }
+        // Unknown or session-mismatched hashes are rejected without touching the CLI.
+        const entry = pendingPlans.get(planHash);
+        if (entry === undefined || entry.sessionId !== hostSessionId) {
+          return toolText({
+            plan_hash: planHash,
+            status: "error",
+            errors: ["unknown or session-mismatched plan_hash; run engram_capture_preview first"],
+          });
+        }
+        const resolution = await resolveCaptureModule();
+        if (resolution.kind !== "available") {
+          return toolText({ plan_hash: planHash, status: "error", errors: ["binding-selected pack is unavailable"] });
+        }
+
+        if (entry.state === "previewed") {
+          const outcome = await withTempCandidate(entry.candidate, (file) =>
+            runCli(["knowledge", "approve", "--candidate", file, "--expect", planHash]));
+          const parsed = parseCliApplyOutcome(outcome.stdout);
+          if (parsed?.status === "stale_approval") {
+            pendingPlans.delete(planHash);
+            return toolText({ plan_hash: planHash, status: "stale", errors: [] });
+          }
+          if (parsed === undefined) {
+            return toolText({
+              plan_hash: planHash,
+              status: "error",
+              errors: [
+                `engram knowledge approve failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
+              ],
+            });
+          }
+          entry.appliedPlan = { planHash, mutations: parsed.mutations };
+          entry.appliedAt ??= new Date().toISOString();
+          entry.appliedStatus = parsed.status === "committed" ? "committed" : "no-change";
+          entry.indexState = parsed.index;
+          entry.state = "records-committed";
+        }
+
+        const appliedPlan = entry.appliedPlan;
+        if (appliedPlan === undefined) {
+          return toolText({ plan_hash: planHash, status: "error", errors: ["pending entry lost its applied plan"] });
+        }
+        const summary = summarizeMutations(appliedPlan.mutations);
+        let materialization: MaterializationOutcome = { written: [], unchanged: [], stale: [] };
+        let materializationFailed = false;
+        if (resolution.materialize !== undefined) {
+          try {
+            materialization = normalizeMaterialization(
+              await resolution.materialize(appliedPlan, materializeTools(entry)),
+            );
+          } catch (error) {
+            materializationFailed = true;
+            api.logger.warn(`[engram] materialization failed for plan ${planHash}: ${String(error)}`);
+            materialization.stale.push({
+              path: "(materialization)",
+              reason: String(error instanceof Error ? error.message : error),
+            });
+          }
+        }
+        if (materializationFailed) {
+          // Records stay committed; the entry is retained so a second apply
+          // with the SAME hash reruns ONLY materialize, never knowledge approve.
+          return toolText({
+            plan_hash: planHash,
+            status: "records-committed",
+            index: entry.indexState,
+            created: summary.created,
+            retired: summary.retired,
+            entity_keys: summary.entityKeys,
+            artifacts: {
+              generated: materialization.written.map((item) => item.path),
+              unchanged: materialization.unchanged.map((item) => item.path),
+              stale: materialization.stale,
+            },
+            retry: "apply the same plan_hash to retry materialization only",
+          });
+        }
+        pendingPlans.delete(planHash);
+        lastIndexState = entry.indexState;
+        for (const staleItem of materialization.stale) sessionStaleArtifacts.push(staleItem.path);
+        return toolText({
+          plan_hash: planHash,
+          status: entry.appliedStatus ?? "committed",
+          index: entry.indexState,
+          created: summary.created,
+          retired: summary.retired,
+          entity_keys: summary.entityKeys,
+          artifacts: {
+            generated: materialization.written.map((item) => item.path),
+            unchanged: materialization.unchanged.map((item) => item.path),
+            stale: materialization.stale,
+          },
+        });
+      } catch (error) {
+        return toolText({ status: "error", errors: [String(error instanceof Error ? error.message : error)] });
       }
     },
   });
