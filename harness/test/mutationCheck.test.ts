@@ -102,9 +102,9 @@ function runSynthetic(repo: SyntheticRepo, ids: string[] = []): { status: number
   return runSyntheticScript(repo, join(repo.harness, "scripts", "mutation-check.ts"), ids);
 }
 
-test("the mutation registry contains exactly 96 registered core properties with one unique non-historical id and one source seam each", async () => {
-  assert.equal(mutations.length, 96);
-  assert.equal(new Set(mutations.map((mutation) => mutation.id)).size, 96);
+test("the mutation registry contains exactly 102 registered core properties with one unique non-historical id and one source seam each", async () => {
+  assert.equal(mutations.length, 102);
+  assert.equal(new Set(mutations.map((mutation) => mutation.id)).size, 102);
 
   for (const mutation of mutations) {
     assert.match(mutation.id, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);

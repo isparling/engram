@@ -102,7 +102,13 @@ async function callJsonTool(
 ): Promise<Record<string, any>> {
   const tool = harness.tools.get(name);
   assert.ok(tool !== undefined, `${name} was not registered`);
-  const result = await tool.execute(params);
+  const result = await tool.execute(
+    "test-tool-call",
+    params,
+    undefined,
+    undefined,
+    { cwd: harness.space.root },
+  );
   return JSON.parse(result.content[0]?.text ?? "{}");
 }
 
@@ -318,7 +324,6 @@ function changeSetFor(harness: Harness, note: string): Record<string, unknown> {
   return {
     target: "seed-record",
     note,
-    space: harness.spaceId,
     session_id: harness.sessionId,
   };
 }
@@ -354,7 +359,12 @@ test("preview returns mutation summary without exposing the candidate; apply com
     const preview = await previewPlan(harness, "first structured note");
     assert.equal(typeof preview.plan_hash, "string");
     assert.ok((preview.plan_hash ?? "").length > 0);
-    assert.deepEqual(preview.changes, [{ recordId: "seed-record", action: "update" }]);
+    assert.deepEqual(preview.changes, [{
+      recordId: "seed-record",
+      action: "update",
+      classification: "fixture",
+      metadata: { source: "external-demo" },
+    }]);
     assert.deepEqual(preview.artifacts, ["generated/status-view.yaml"]);
     assert.equal(preview.status, undefined);
 

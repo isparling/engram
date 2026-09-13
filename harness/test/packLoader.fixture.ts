@@ -211,7 +211,7 @@ export async function captureFromTurn(
 // candidate privately and expose only the mutation summary.
 // ---------------------------------------------------------------------------
 
-export function fixtureCandidate(changeSet: JsonObject): KnowledgeEnvelope {
+export function fixtureCandidate(changeSet: JsonObject, spaceId: string): KnowledgeEnvelope {
   const target = changeSet.target;
   return {
     id: `structured-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -219,7 +219,7 @@ export function fixtureCandidate(changeSet: JsonObject): KnowledgeEnvelope {
     status: "candidate",
     disposition: "new",
     scope: {
-      space: typeof changeSet.space === "string" ? changeSet.space : "external-fixture-space",
+      space: spaceId,
       subjects: [],
       topics: ["test:structured"],
       contexts: [],
@@ -238,11 +238,12 @@ export function fixtureCandidate(changeSet: JsonObject): KnowledgeEnvelope {
 }
 
 export type FixturePreviewTools = {
+  spaceId: string;
   previewCandidate(candidate: KnowledgeEnvelope): Promise<HostCapturePreview>;
 };
 
 export async function previewStructuredCapture(changeSet: JsonObject, tools: FixturePreviewTools) {
-  const candidate = fixtureCandidate(changeSet);
+  const candidate = fixtureCandidate(changeSet, tools.spaceId);
   const host = await tools.previewCandidate(candidate);
   if (host.status === "blocked") return { schemaVersion: 0, status: "blocked" as const, errors: host.errors };
   return {
@@ -250,7 +251,12 @@ export async function previewStructuredCapture(changeSet: JsonObject, tools: Fix
     status: "ready" as const,
     planHash: host.planHash,
     candidate,
-    changes: host.mutations.map((mutation) => ({ recordId: mutation.recordId, action: mutation.action })),
+    changes: host.mutations.map((mutation) => ({
+      recordId: mutation.recordId,
+      action: mutation.action,
+      classification: "fixture",
+      metadata: { source: "external-demo" },
+    })),
     artifacts: ["generated/status-view.yaml"],
   };
 }

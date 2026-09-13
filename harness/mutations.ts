@@ -1078,6 +1078,75 @@ export const mutations: Mutation[] = [
     replace: "if (false) api.registerTool({\n    name: \"engram_capture_preview\",",
     mustFail: ["preview returns mutation summary without exposing the candidate"],
   },
+  {
+    id: "exact-selector-routed-through-semantic-qmd",
+    property:
+      "Exact related-record selection enumerates the active records root directly and never invokes qmd: routing an exact selection through semantic search would let phrase-similar sibling records with different exact identities enter reconciliation.",
+    file: "src/knowledgeTransaction.ts",
+    find: "    retrieval = await retrieveExactRelatedRecords(input.binding, selection.matches);",
+    replace: '    retrieval = await retrieveRelatedRecords(input.binding, selection.description, input.spawnFn);',
+    mustFail: [
+      "exact related-record selection enumerates the space without qmd and selects only exact key matches",
+    ],
+  },
+  {
+    id: "guarded-read-resolved-target-containment-disabled",
+    property:
+      "A Markdown locator inside the active records root whose real target resolves outside it is refused with path_escape by the shared guarded-read containment check instead of being followed; search hits, enumeration, exact selection, and the guarded record listing all read through this one seam.",
+    file: "src/knowledgeRetrieval.ts",
+    find: "  if (resolvedTarget !== root && !resolvedTarget.startsWith(rootWithSep)) {",
+    replace: "  if (false && resolvedTarget !== root && !resolvedTarget.startsWith(rootWithSep)) {",
+    mustFail: [
+      "listKnowledgeRecords reports a guarded retrieval error for a symlinked record escaping the records root instead of silently omitting it",
+    ],
+  },
+  {
+    id: "artifact-parent-symlink-escape-permitted",
+    property:
+      "Every existing parent directory of a materialized artifact is realpath-resolved and must stay inside the canonicalized artifact root, so a symlinked parent cannot move an artifact write outside the requested root while the destination path itself looks contained.",
+    file: "src/artifactReplacement.ts",
+    find: "  if (!containsPath(rootReal, ancestorReal)) {",
+    replace: "  if (false && !containsPath(rootReal, ancestorReal)) {",
+    mustFail: [
+      "replaceArtifact rejects a parent-directory symlink that resolves outside the requested root",
+    ],
+  },
+  {
+    id: "ambient-isolation-flags-dropped",
+    property:
+      "Headless ambient completion spawns its child OMP with --no-session --no-extensions --no-skills --no-prompt-templates so extraction can never load session history, extensions, skills, or prompt templates (recursive capture and workflow contamination).",
+    file: "omp/omp-extension.ts",
+    find: [
+      '          "--no-session",',
+      '          "--no-extensions",',
+      '          "--no-skills",',
+      '          "--no-prompt-templates",',
+    ].join("\n"),
+    replace: '          "// mutation drops every headless isolation flag.",',
+    mustFail: ["headless completion spawns an isolated child OMP with the exact argv"],
+  },
+  {
+    id: "extension-stale-apply-gate-disabled",
+    property:
+      'When the CLI reports stale_approval for a previewed plan, engram_capture_apply returns status "stale" and deletes the pending entry, forcing a fresh preview and fresh approval instead of treating a refused approval as committed.',
+    file: "omp/omp-extension.ts",
+    find: '          if (parsed?.status === "stale_approval") {',
+    replace: '          if (false && parsed?.status === "stale_approval") {',
+    mustFail: [
+      "apply after an underlying record mutation is refused as stale; fresh preview recovers",
+    ],
+  },
+  {
+    id: "committed-plan-retry-reapproves-records",
+    property:
+      "A second engram_capture_apply carrying the same committed hash reruns ONLY pack materialization; re-entering the CLI approve path on retry resubmits already-committed records and surfaces stale_approval after any post-commit record change.",
+    file: "omp/omp-extension.ts",
+    find: '        if (entry.state === "previewed") {',
+    replace: '        if (true || entry.state === "previewed") {',
+    mustFail: [
+      "materializer failure retains the plan; retrying the same hash reruns only materialization",
+    ],
+  },
 ];
 
 /** Uppercase alias for callers that prefer registry-style constants. */

@@ -16,6 +16,7 @@ import {
   type KnowledgeProposal,
 } from "../src/knowledgeTransaction.ts";
 import { parseKnowledgeRecord, serializeKnowledgeRecord } from "../src/knowledgeRecord.ts";
+import { validateKnowledgeEnvelope } from "../src/knowledgeValidation.ts";
 import { retrieveRelatedRecords } from "../src/knowledgeRetrieval.ts";
 import { acquireTransactionLock } from "../src/transactionLock.ts";
 import { runQmd } from "../src/qmdRunner.ts";
@@ -219,6 +220,8 @@ test("invalid pack, source, session, scope, state, kind, disposition, newline, a
     { name: "invalid kind", value: { ...valid, kind: "summary" }, code: "kind_invalid" },
     { name: "invalid disposition", value: { ...valid, disposition: "merge" }, code: "disposition_invalid" },
     { name: "newline structure injection", value: { ...valid, statement: "safe\n## Statement\nforged" }, code: "newline_forbidden" },
+    { name: "newline in id", value: { ...valid, id: "orbit-rev\nised" }, code: "newline_forbidden" },
+    { name: "newline in source ref", value: { ...valid, sources: [{ type: "observation", ref: "source:x\ny" }] }, code: "newline_forbidden" },
   ];
 
   for (const invalidCase of invalidCases) {
@@ -234,7 +237,49 @@ test("invalid pack, source, session, scope, state, kind, disposition, newline, a
     assert.ok(outcome.errors.some((error) => error.code === invalidCase.code), invalidCase.name);
     assert.equal(scripted.calls.length, 0, `${invalidCase.name} must fail before qmd retrieval`);
   }
+
   assert.deepEqual(await readFile(recordPath), before);
+});
+test("a multi-line string inside details validates and survives a serialize/parse round trip byte-identically", () => {
+  const multiLine = [
+    "## Imported notes",
+    "",
+    "  - indented bullet with interior   spacing",
+    "",
+    "\ttab-indented continuation line",
+    "final line without trailing newline",
+  ].join("\n");
+  const validated = validateKnowledgeEnvelope(
+    candidate("new", {
+      details: {
+        value: {
+          legacyMarkdown: multiLine,
+        },
+      },
+    }),
+  );
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  const record: KnowledgeRecord = {
+    schemaVersion: 0,
+    ...validated.value,
+    relationships: { supports: [], contradicts: [], refines: [], supersedes: [] },
+    history: [],
+  };
+  const text = serializeKnowledgeRecord(record);
+  // The serializer must keep the value on one physical frontmatter line by
+  // emitting the escaped form; a literal newline would corrupt the
+  // line-oriented format and break parsing.
+  const escaped = JSON.stringify(multiLine).slice(1, -1);
+  assert.ok(text.includes(escaped), "serialized record must escape interior newlines");
+  const reparsed = parseKnowledgeRecord(text);
+  assert.equal(reparsed.ok, true);
+  if (!reparsed.ok) return;
+  const stored = reparsed.value.details["value"];
+  if (stored === undefined || stored === null || typeof stored !== "object" || Array.isArray(stored)) {
+    assert.fail("details.value must survive the round trip as an object");
+  }
+  assert.equal(stored["legacyMarkdown"], multiLine);
 });
 
 test("the active space excludes a sibling: only the active collection is queried and sibling content enters no plan", async () => {

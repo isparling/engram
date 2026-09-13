@@ -2,9 +2,9 @@
 
 ## Status
 
-The registry pins ninety-six core properties across the harness runtime, the
-standalone release manager, the mutation checker itself, and the omp
-extension — 96 properties in total, all listed below. The registry is
+The registry pins one hundred two core properties across the harness runtime,
+the standalone release manager, the mutation checker itself, and the omp
+extension — 102 properties in total, all listed below. The registry is
 core-only: every entry targets a file in `harness/`, `release/`, or the
 extension surface, and each entry carries a stable, unique, non-historical
 identifier.
@@ -184,6 +184,10 @@ entries by the source file they pin.
 | `retrieval-enumerated-receipt-no-threshold` | An enumerated retrieval receipt reports no relevance threshold, because enumeration never ranked or filtered candidates by score. |
 | `retrieval-enumerated-receipt-no-query` | An enumerated retrieval receipt records query as null instead of fabricating a query that never ran. |
 | `retrieval-enumeration-symlink-guarded` | Enumeration includes a Markdown symlink as a candidate so the shared realpath-containment guard can refuse an escape instead of silently skipping it. |
+| `guarded-read-resolved-target-containment-disabled` | A Markdown locator inside the active records root whose real target resolves outside it is refused with path_escape by the shared guarded-read containment check instead of being followed; search hits, enumeration, exact selection, and the guarded record listing all read through this one seam. |
+
+## src/artifactReplacement.ts
+| `artifact-parent-symlink-escape-permitted` | Every existing parent directory of a materialized artifact is realpath-resolved and must stay inside the canonicalized artifact root, so a symlinked parent cannot move an artifact write outside the requested root while the destination path itself looks contained. |
 
 ## src/guardedRetrievalInternal.ts
 | `unresolved-receipt-active-space-null` | A guarded retrieval attempted with no active space returns a failure receipt whose activeSpace field is null, never a fabricated space id. |
@@ -214,6 +218,7 @@ entries by the source file they pin.
 | `transaction-no-change-triggers-refresh` | A plan classified no-change returns status "no_change" without writing anything or attempting a qmd refresh, rather than falling through to a commit. |
 | `transaction-related-record-symlink-swap-blocked-by-realpath-containment` | Once retrieval and the pre-plan authoritative comparison have accepted a related record, replacing its file on disk with a symlink to outside the active records root — whether before the mutation plan is built or after an approval preview — is caught by realpath containment in readCurrent and fails closed rather than reading the outside target into the plan or committing over it. |
 | `transaction-related-record-race-fails-closed` | A related record's on-disk content re-read by the pre-plan authoritative comparison, after retrieval already read a copy of it, is compared against what retrieval returned; disabling that comparison lets a related record rewritten in that window flow through as if unchanged, producing a proposal instead of an invalid outcome with a related_record_changed error. |
+| `exact-selector-routed-through-semantic-qmd` | Exact related-record selection enumerates the active records root directly and never invokes qmd: routing an exact selection through semantic search would let phrase-similar sibling records with different exact identities enter reconciliation. |
 
 ## src/transactionLock.ts
 | `transaction-stale-recovery-ownership-swap-permitted` | If the transaction lock's owner metadata changes between a stale-lock diagnosis and the recovery removal, recovery fails closed (lock_conflict) and never removes the changed owner. |
@@ -254,6 +259,9 @@ entries by the source file they pin.
 | `release-clean-source-required` | Release candidate construction refuses every tracked or untracked source change before staging, so copied bytes remain attributable to the recorded commit. |
 
 ## omp/omp-extension.ts
+| `ambient-isolation-flags-dropped` | Headless ambient completion spawns its child OMP with --no-session --no-extensions --no-skills --no-prompt-templates so extraction can never load session history, extensions, skills, or prompt templates (recursive capture and workflow contamination). |
+| `extension-stale-apply-gate-disabled` | When the CLI reports stale_approval for a previewed plan, engram_capture_apply returns status "stale" and deletes the pending entry, forcing a fresh preview and fresh approval instead of treating a refused approval as committed. |
+| `committed-plan-retry-reapproves-records` | A second engram_capture_apply carrying the same committed hash reruns ONLY pack materialization; re-entering the CLI approve path on retry resubmits already-committed records and surfaces stale_approval after any post-commit record change. |
 | `omp-extension-registers-capture-preview-tool` | Disabling the `engram_capture_preview` registration in omp-extension.ts leaves explicit capture without its preview tool; the check test "preview returns mutation summary without exposing the candidate; apply commits the same hash" fails because `callJsonTool` asserts the tool was registered. |
 
 ## Notes on individual entries
@@ -286,9 +294,19 @@ defence.
 qualification-flow test in `test/releaseQualification.test.ts`. The registered entry
 mutates the parser-level guard in `parseVerificationSummary`
 (`../release/engram-release.ts`) and is pinned by the parser-level test of the same name
+
 in `test/releaseMetadata.test.ts`, which fails directly against the mutation; the
 qualification-flow test of the same name never observes a mismatch because the synthetic
 release it qualifies is built with matching hashes to begin with.
+
+The ambient capture channel's no-deterministic-fallback property has **no
+entry of its own**, deliberately. The seam lives in an external pack module
+resolved through a binding's `installed_packs[].from` specifier, and packs are
+never mutated by this tool (see Mutable roots above) — a registry entry can only
+name files inside the engram repository (`harness/`, `release/`, `omp/`). The
+harness-side half that IS pinned here is `ambient-isolation-flags-dropped`; the
+pack-side half (LLM-only extraction with one repair attempt and no
+deterministic draft) is pinned by the external pack's own test suite instead.
 
 ## Acceptance
 

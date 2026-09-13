@@ -104,9 +104,16 @@ export type ToolResult = {
 
 export interface ToolDefinition {
   name: string;
+  label: string;
   description: string;
   parameters: unknown;
-  execute: (params: Record<string, unknown>) => Promise<ToolResult>;
+  execute: (
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    onUpdate: unknown,
+    ctx: ExtensionContext,
+  ) => Promise<ToolResult>;
 }
 
 /**
@@ -154,6 +161,7 @@ export type CaptureHandler = (
 
 /** Host mechanics handed to a pack's previewStructuredCapture. */
 export type StructuredPreviewTools = {
+  spaceId: string;
   previewCandidate(candidate: KnowledgeEnvelope): Promise<HostCapturePreview>;
 };
 
@@ -285,6 +293,17 @@ function isJsonObject(value: unknown): value is { [key: string]: unknown } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isJsonRecord(value);
+}
+
+function isJsonRecord(value: unknown): value is { [key: string]: JsonValue } {
+  return isJsonObject(value) && Object.values(value).every(isJsonValue);
+}
+
 function parseKnowledgeError(value: unknown): KnowledgeError | undefined {
   if (!isJsonObject(value)) return undefined;
   if (typeof value.code !== "string" || typeof value.message !== "string") return undefined;
@@ -313,7 +332,7 @@ type PackPreviewReady = {
   status: "ready";
   planHash: string;
   candidate: KnowledgeEnvelope;
-  changes: Array<{ recordId: string; action: "create" | "update" }>;
+  changes: Array<{ [key: string]: JsonValue }>;
   artifacts: string[];
 };
 
@@ -331,10 +350,8 @@ function parsePackPreview(
   if (!Array.isArray(value.changes) || !Array.isArray(value.artifacts)) return undefined;
   const changes: PackPreviewReady["changes"] = [];
   for (const change of value.changes) {
-    if (!isJsonObject(change)) return undefined;
-    if (typeof change.recordId !== "string") return undefined;
-    if (change.action !== "create" && change.action !== "update") return undefined;
-    changes.push({ recordId: change.recordId, action: change.action });
+    if (!isJsonRecord(change)) return undefined;
+    changes.push(change);
   }
   const artifacts: string[] = [];
   for (const artifact of value.artifacts) {
@@ -1119,6 +1136,7 @@ export default async function engramExtension(
   // -----------------------------------------------------------------------
   api.registerTool({
     name: "engram_status",
+    label: "Engram status",
     description: "Report the binding-selected pack identity, CLI mode, and pending capture state.",
     parameters: { type: "object", properties: {} },
     execute: async () => toolText({
@@ -1140,6 +1158,7 @@ export default async function engramExtension(
   // -----------------------------------------------------------------------
   api.registerTool({
     name: "engram_capture_preview",
+    label: "Preview Engram capture",
     description: `Preview a structured knowledge capture against the active engram space.
 The binding-selected pack turns your change set into candidate records, the
 host reconciles them authoritatively, and you receive the exact mutation plan
@@ -1155,7 +1174,7 @@ Parameters:
       required: ["change_set"],
       additionalProperties: false,
     },
-    execute: async (params: Record<string, unknown>) => {
+    execute: async (_toolCallId: string, params: Record<string, unknown>) => {
       try {
         if (hostSessionId === undefined) {
           return toolText({ status: "error", errors: ["no active engram session; settle a turn first"] });
@@ -1178,6 +1197,7 @@ Parameters:
         const packResult = await resolution.previewStructuredCapture(
           changeSet as { [key: string]: JsonValue },
           {
+            spaceId: extractionSpaceId,
             previewCandidate: async (candidate) => {
               hostPreview = await previewCandidate(candidate);
               return hostPreview;
@@ -1225,6 +1245,7 @@ Parameters:
   // -----------------------------------------------------------------------
   api.registerTool({
     name: "engram_capture_apply",
+    label: "Apply Engram capture",
     description: `Commit a previously previewed engram capture plan by its exact plan hash.
 If the underlying records changed since the preview, the apply is refused as
 stale and a fresh preview/approval round is required. After records commit,
@@ -1238,7 +1259,7 @@ a second apply with the same hash retries only view regeneration.`,
       required: ["plan_hash"],
       additionalProperties: false,
     },
-    execute: async (params: Record<string, unknown>) => {
+    execute: async (_toolCallId: string, params: Record<string, unknown>) => {
       try {
         if (hostSessionId === undefined) {
           return toolText({ status: "error", errors: ["no active engram session; settle a turn first"] });

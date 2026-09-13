@@ -41,20 +41,6 @@ function isJsonValue(value: unknown): value is JsonValue {
   return Object.values(value).every((item) => isJsonValue(item));
 }
 
-function findNewline(value: JsonValue, field: string, errors: KnowledgeError[]): void {
-  if (typeof value === "string") {
-    if (/[\r\n]/.test(value)) errors.push(error("newline_forbidden", `${field} must not contain newlines`, field));
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => findNewline(item, `${field}[${index}]`, errors));
-    return;
-  }
-  if (value !== null && typeof value === "object") {
-    for (const [key, item] of Object.entries(value)) findNewline(item, `${field}.${key}`, errors);
-  }
-}
-
 function nonEmptySingleLine(value: unknown, field: string, errors: KnowledgeError[], pattern?: RegExp): string | undefined {
   if (typeof value !== "string" || value.trim().length === 0) {
     errors.push(error("field_invalid", `${field} must be a non-empty string`, field));
@@ -212,11 +198,8 @@ export function validateKnowledgeEnvelope(raw: unknown): KnowledgeResult<Knowled
       if (!isJsonValue(item)) validDetails = false;
       else parsedDetails[key] = item;
     }
-    if (!validDetails) errors.push(error("details_invalid", "details must be a JSON object", "details"));
-    else {
-      details = parsedDetails;
-      findNewline(details, "details", errors);
-    }
+    if (validDetails) details = parsedDetails;
+    else errors.push(error("details_invalid", "details must be a JSON object", "details"));
   }
 
   const scope = parseScope(raw.scope, errors);
