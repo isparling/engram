@@ -1,6 +1,6 @@
 {
   "name": "@isparling/engram-omp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "license": "Apache-2.0",
@@ -12,7 +12,7 @@
   "pi": { "extensions": ["./omp-extension.ts"] },
   "files": ["omp-extension.ts", "README.md"],
   "peerDependencies": {
-    "@isparling/engram-harness": "^0.1.0"
+    "@isparling/engram-harness": "^0.2.0"
   },
   "publishConfig": { "access": "public" }
 }
