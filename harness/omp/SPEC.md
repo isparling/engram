@@ -60,6 +60,25 @@ The extension registers three tools and one lifecycle hook:
   `mode: "cli"`, the session's pending plan hashes, the last known qmd index
   state, and any artifacts that failed to regenerate.
 
+## Host runtime
+
+Bun is the only runtime the extension requires. Oh My Pi installs npm plugins
+with `bun install` and imports extension modules with Bun, so the adapter
+resolves both its CLI (`@isparling/engram-cli`, a runtime dependency) and the
+binding's bare `installed_packs[].from` specifiers through a `bun` subprocess
+calling `Bun.resolveSync`, anchored at the adapter's own package directory.
+
+Two host constraints make that the only portable resolution: Oh My Pi
+sanitizes the extension `PATH`, so a Node interpreter is not reachable on an
+ordinary version-managed machine, and plugin modules load through a virtual
+resolver whose in-process `import.meta.resolve`, `Bun.resolveSync`, and
+`createRequire(...).resolve` cannot see sibling installed packages. Resolution
+must therefore depend on neither `node` nor in-process specifier lookup. The
+headless extraction child is likewise restricted to flags the installed Oh My
+Pi accepts (`--no-session --no-extensions --no-skills --no-rules`); an
+unsupported isolation flag makes every ambient completion exit non-zero and
+silently produces no drafts.
+
 ## Reason
 
 The extension owns only host mechanics: settled-turn normalization,
