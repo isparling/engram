@@ -11,7 +11,7 @@
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SPACE_A_RECORDS_DIR = join(HARNESS_ROOT, "test-fixtures", "space-a", "records");
 const CLI_PATH = join(HARNESS_ROOT, "src", "cli.ts");
 const FIXTURE_PATH = join(HARNESS_ROOT, "test", "packLoader.fixture.ts");
+const NO_NODE_FIXTURE_PATH = join(HARNESS_ROOT, "omp", "noNodeRuntime.fixture.ts");
 
 const ENV_KEYS = ["ENGRAM_BINDING_REGISTRY", "ENGRAM_HOST_SESSION_ID", "ENGRAM_CLI", "ENGRAM_PROJECT_ROOT"] as const;
 const spacesToClean: EphemeralSpace[] = [];
@@ -350,6 +351,26 @@ async function mutateSeedRecordOnDisk(harness: Harness): Promise<void> {
 // Tests
 // ---------------------------------------------------------------------------
 
+test("bare installed packs load when Node is absent from the extension PATH", async () => {
+  const binRoot = await mkdtemp(join(tmpdir(), "engram-omp-path-"));
+  try {
+    await symlink(process.execPath, join(binRoot, "bun"));
+    const child = Bun.spawn([process.execPath, NO_NODE_FIXTURE_PATH], {
+      cwd: HARNESS_ROOT,
+      env: { ...process.env, PATH: binRoot },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const exitCode = await child.exited;
+    const stdout = await new Response(child.stdout).text();
+    const stderr = await new Response(child.stderr).text();
+    assert.equal(exitCode, 0, (stdout || stderr).slice(0, 1_000));
+    assert.match(stdout, /bare pack capture succeeded without Node/);
+  } finally {
+    await rm(binRoot, { recursive: true, force: true });
+  }
+});
+
 test("preview returns mutation summary without exposing the candidate; apply commits the same hash", async () => {
   const harness = await startHarness("omp-cap-happy", "omp-cap-happy-session");
   try {
@@ -522,7 +543,7 @@ test("headless completion spawns an isolated child OMP with the exact argv", asy
       "--no-session",
       "--no-extensions",
       "--no-skills",
-      "--no-prompt-templates",
+      "--no-rules",
       "--mode",
       "text",
       "--model",

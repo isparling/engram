@@ -1114,13 +1114,13 @@ export const mutations: Mutation[] = [
   {
     id: "ambient-isolation-flags-dropped",
     property:
-      "Headless ambient completion spawns its child OMP with --no-session --no-extensions --no-skills --no-prompt-templates so extraction can never load session history, extensions, skills, or prompt templates (recursive capture and workflow contamination).",
+      "Headless ambient completion spawns its child OMP with --no-session --no-extensions --no-skills --no-rules so extraction can never load session history, extensions, skills, or project rules (recursive capture and workflow contamination).",
     file: "omp/omp-extension.ts",
     find: [
       '          "--no-session",',
       '          "--no-extensions",',
       '          "--no-skills",',
-      '          "--no-prompt-templates",',
+      '          "--no-rules",',
     ].join("\n"),
     replace: '          "// mutation drops every headless isolation flag.",',
     mustFail: ["headless completion spawns an isolated child OMP with the exact argv"],

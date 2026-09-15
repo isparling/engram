@@ -98,10 +98,10 @@ test("property: generic harness package exports generic contracts but no OMP ada
   assert.equal((await packPaths(harness)).includes("omp-extension.ts"), false);
 });
 
-test("property: OMP package payload contains only the OMP adapter distribution surface", async () => {
+test("property: OMP package ships only the adapter and declares its runtime CLI dependency", async () => {
   const manifest = await readPackageJson(omp);
   assert.equal(manifest.name, "@isparling/engram-omp");
   assert.equal(requireExport(manifest, ".").import, "./omp-extension.ts");
-  assert.equal(manifest.dependencies, undefined);
+  assert.deepEqual(manifest.dependencies, { "@isparling/engram-cli": "^0.2.0" });
   assert.deepEqual(await packPaths(omp), ["LICENSE", "README.md", "omp-extension.ts", "package.json"]);
 });

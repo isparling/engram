@@ -259,7 +259,7 @@ entries by the source file they pin.
 | `release-clean-source-required` | Release candidate construction refuses every tracked or untracked source change before staging, so copied bytes remain attributable to the recorded commit. |
 
 ## omp/omp-extension.ts
-| `ambient-isolation-flags-dropped` | Headless ambient completion spawns its child OMP with --no-session --no-extensions --no-skills --no-prompt-templates so extraction can never load session history, extensions, skills, or prompt templates (recursive capture and workflow contamination). |
+| `ambient-isolation-flags-dropped` | Headless ambient completion spawns its child OMP with --no-session --no-extensions --no-skills --no-rules so extraction can never load session history, extensions, skills, or project rules (recursive capture and workflow contamination). |
 | `extension-stale-apply-gate-disabled` | When the CLI reports stale_approval for a previewed plan, engram_capture_apply returns status "stale" and deletes the pending entry, forcing a fresh preview and fresh approval instead of treating a refused approval as committed. |
 | `committed-plan-retry-reapproves-records` | A second engram_capture_apply carrying the same committed hash reruns ONLY pack materialization; re-entering the CLI approve path on retry resubmits already-committed records and surfaces stale_approval after any post-commit record change. |
 | `omp-extension-registers-capture-preview-tool` | Disabling the `engram_capture_preview` registration in omp-extension.ts leaves explicit capture without its preview tool; the check test "preview returns mutation summary without exposing the candidate; apply commits the same hash" fails because `callJsonTool` asserts the tool was registered. |

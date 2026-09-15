@@ -19,11 +19,10 @@ import type { KnowledgeEnvelope } from "@isparling/engram-harness/knowledge-type
 ```
 
 A host integration owns translating its own lifecycle events (hooks, tool
-calls, session boundaries) onto these contracts, and sends captured
-knowledge through the independently installed `engram` CLI
-(`@isparling/engram-cli`) rather than importing engram's internal
-transaction pipeline. For the Oh My Pi host, that translation already
-exists as `@isparling/engram-omp`; see
+calls, session boundaries) onto these contracts and sends captured knowledge
+through the `engram` CLI rather than importing engram's internal transaction
+pipeline. The Oh My Pi adapter packages that CLI as a runtime dependency; its
+translation already exists as `@isparling/engram-omp`. See
 [harness/omp/README.md](https://github.com/isparling/engram/blob/main/harness/omp/README.md).
 
 ## Exports

@@ -18,7 +18,7 @@ Two things happen automatically:
 ## Requirements
 
 - Oh My Pi must be installed.
-- `@isparling/engram-omp` and `@isparling/engram-cli` must be installed.
+- `@isparling/engram-omp` must be installed; its CLI runtime dependency is automatic.
 - A valid engram binding registry must exist.
 - The project must contain an `engram.space.json` for its registered space, or
   `ENGRAM_SPACE_ID` must name the intended registered space.
@@ -26,12 +26,17 @@ Two things happen automatically:
 ## Install the Extension
 
 ```sh
-npm install @isparling/engram-omp @isparling/engram-harness @isparling/engram-cli
+omp install @isparling/engram-omp
 ```
 
-Add the extension to your Oh My Pi settings file's `extensions` list:
+OMP discovers the extension from the installed package manifest. For an
+explicit project-local npm installation instead:
 
+```sh
+npm install @isparling/engram-omp @isparling/engram-harness
 ```
+
+```yaml
 extensions:
   - ./node_modules/@isparling/engram-omp/omp-extension.ts
 ```
@@ -43,7 +48,7 @@ The extension reads these variables at session start:
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `ENGRAM_BINDING_REGISTRY` | Yes | Path to the engram binding registry file |
-| `ENGRAM_CLI` | No | Path to the engram CLI binary. Default is `engram` |
+| `ENGRAM_CLI` | No | Override the packaged `@isparling/engram-cli` executable |
 | `ENGRAM_SPACE_ID` | No | Overrides the nearest `engram.space.json` space id |
 
 Set `ENGRAM_BINDING_REGISTRY` before you start Oh My Pi. On the first settled
@@ -51,8 +56,8 @@ turn of each fresh session, the extension preserves any existing manual
 selection; otherwise it selects `ENGRAM_SPACE_ID`, then falls back to the
 nearest `engram.space.json`.
 
-Set `ENGRAM_CLI` only if the CLI is not resolvable from the installed
-`@isparling/engram-cli` package or from `PATH`.
+Set `ENGRAM_CLI` only to override the CLI installed as the adapter's runtime
+dependency, normally for local development.
 
 ## How to Start Oh My Pi with the Extension
 
@@ -123,12 +128,12 @@ hashes for the current session, index state, and stale artifacts.
 
 **A capture tool returns an error.**
 
-- Check that the engram CLI is installed.
+- Run `omp plugin doctor`; reinstall `@isparling/engram-omp` if its packaged CLI dependency is missing.
 - Check that the binding registry has a valid space.
 - Check that the active space declares a resolvable pack.
 
 **Turn-end extraction does not run.**
 
-- Check that the engram CLI is installed and resolvable.
-- Check that `ENGRAM_CLI` points to the correct binary, if set.
+- Run `omp plugin doctor`; reinstall `@isparling/engram-omp` if its packaged CLI dependency is missing.
+- Check `ENGRAM_CLI` only if you intentionally override the packaged executable.
 - Check that the active space declares a pack with extraction support.

@@ -263,16 +263,13 @@ function toolText(value: unknown): ToolResult {
   };
 }
 async function nativePackageSpecifier(specifier: string): Promise<string> {
-  const parentUrl = pathToFileURL(fileURLToPath(import.meta.url)).href;
   const proc = Bun.spawn([
-    "node",
-    "--experimental-import-meta-resolve",
-    "--input-type=module",
-    "-e",
-    "console.log(import.meta.resolve(process.argv[1], process.argv[2]))",
+    "bun",
+    "--eval",
+    "const specifier: string = process.argv[1]; console.log(Bun.resolveSync(specifier, process.cwd()));",
     specifier,
-    parentUrl,
   ], {
+    cwd: dirname(fileURLToPath(import.meta.url)),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -280,7 +277,7 @@ async function nativePackageSpecifier(specifier: string): Promise<string> {
   const stdout = (await new Response(proc.stdout).text()).trim();
   if (exitCode !== 0 || stdout === "") {
     const stderr = await new Response(proc.stderr).text();
-    throw new Error(`native ESM resolution failed: ${stderr.slice(0, 500)}`);
+    throw new Error(`Bun module resolution failed: ${stderr.slice(0, 500)}`);
   }
   return stdout;
 }
@@ -616,11 +613,11 @@ async function withTempContent<T>(content: string, fn: (file: string) => Promise
  * package when it is installed alongside @isparling/engram-omp, then the
  * `engram` command on PATH.
  */
-function resolveCliPath(): string {
+async function resolveCliPath(): Promise<string> {
   const explicit = process.env.ENGRAM_CLI;
   if (explicit !== undefined && explicit.length > 0) return explicit;
   try {
-    return fileURLToPath(import.meta.resolve("@isparling/engram-cli/bin/engram"));
+    return await nativePackageSpecifier("@isparling/engram-cli/bin/engram");
   } catch {
     return "engram";
   }
@@ -659,7 +656,6 @@ export default async function engramExtension(
       stderr: "pipe",
       signal: spawnOptions.signal,
     }));
-  const cliPath = resolveCliPath();
   const registryPath = process.env.ENGRAM_BINDING_REGISTRY;
 
   if (registryPath === undefined || registryPath.length === 0) {
@@ -668,6 +664,7 @@ export default async function engramExtension(
   }
 
   const bindingRegistryPath = registryPath;
+  const cliPath = await resolveCliPath();
 
 
   // Session identifier — captured from OMP's awaited session_stop payload.
@@ -921,7 +918,7 @@ export default async function engramExtension(
           "--no-session",
           "--no-extensions",
           "--no-skills",
-          "--no-prompt-templates",
+          "--no-rules",
           "--mode",
           "text",
           "--model",
