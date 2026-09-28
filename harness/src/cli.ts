@@ -60,8 +60,40 @@ import { listKnowledgeRecords } from "./knowledgeListing.ts";
 import { replaceArtifact } from "./artifactReplacement.ts";
 import { readReleaseManifest } from "../../release/engram-release.ts";
 
+/**
+ * Output written but not yet handed to the OS. `process.exit()` does not wait
+ * for these: on a pipe it discards whatever is still buffered, so a large
+ * result arrives truncated under exit status 0. The entry point awaits them
+ * all before it exits.
+ */
+const pendingWrites: Promise<void>[] = [];
+
+function write(stream: NodeJS.WriteStream, text: string): void {
+  // A failed write (the reader has gone away) is still settled: there is no
+  // one left to report it to, and exiting must not wait on it forever.
+  const { promise, resolve } = Promise.withResolvers<void>();
+  stream.write(text, () => resolve());
+  pendingWrites.push(promise);
+}
+
 function printJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  write(process.stdout, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/**
+ * Ends the command with `code`. It unwinds to the entry point, which flushes
+ * pending output before calling `process.exit`; calling `process.exit`
+ * directly here would truncate piped output.
+ */
+class CliExit {
+  readonly code: number;
+  constructor(code: number) {
+    this.code = code;
+  }
+}
+
+function exit(code: number): never {
+  throw new CliExit(code);
 }
 
 const USAGE = [
@@ -82,9 +114,9 @@ const USAGE = [
 ].join("\n");
 
 function usageError(message: string): never {
-  process.stderr.write(`${message}\n`);
-  process.stderr.write(`${USAGE}\n`);
-  process.exit(1);
+  write(process.stderr, `${message}\n`);
+  write(process.stderr, `${USAGE}\n`);
+  exit(1);
 }
 
 function todayIsoDate(): string {
@@ -93,7 +125,7 @@ function todayIsoDate(): string {
 
 function printInvalid(errors: string[]): never {
   printJson({ schema_version: 0, status: "invalid", errors });
-  process.exit(1);
+  exit(1);
 }
 
 /** Reads all of stdin as a string. */
@@ -183,7 +215,7 @@ async function runSpaceCommand(args: string[]): Promise<void> {
       ...(recorded.ok ? {} : { status_warnings: recorded.errors }),
     };
     printJson(output);
-    if (refresh.state !== "fresh") process.exit(1);
+    if (refresh.state !== "fresh") exit(1);
     return;
   }
   usageError(`unknown space command: ${subcommand ?? "(none)"}`);
@@ -231,7 +263,7 @@ async function runSubmitCommand(rest: string[]): Promise<void> {
       errors: bindingResult.errors,
       refresh: REFRESH_NOT_ATTEMPTED,
     });
-    process.exit(1);
+    exit(1);
   }
 
   let candidateInput: unknown;
@@ -245,7 +277,7 @@ async function runSubmitCommand(rest: string[]): Promise<void> {
       errors: [`failed to read/parse candidate file: ${error instanceof Error ? error.message : String(error)}`],
       refresh: REFRESH_NOT_ATTEMPTED,
     });
-    process.exit(1);
+    exit(1);
   }
 
   const result: SubmitOutcome = await submitCandidate({
@@ -267,10 +299,10 @@ async function runSubmitCommand(rest: string[]): Promise<void> {
 
   printJson(output);
 
-  if (result.status === "committed") process.exit(0);
-  if (result.status === "approval_required") process.exit(2);
-  if (result.status === "stale_approval") process.exit(3);
-  process.exit(1);
+  if (result.status === "committed") exit(0);
+  if (result.status === "approval_required") exit(2);
+  if (result.status === "stale_approval") exit(3);
+  exit(1);
 }
 
 async function readCandidateFile(candidatePath: string): Promise<unknown> {
@@ -329,10 +361,10 @@ function knowledgeListArgs(rest: string[]): { packId: string; statuses: Knowledg
 }
 
 function knowledgeExit(outcome: ApplyKnowledgeOutcome): never {
-  if (outcome.status === "committed" || outcome.status === "rejected" || outcome.status === "no_change") process.exit(0);
-  if (outcome.status === "stale_approval") process.exit(3);
-  if (outcome.status === "approval_required") process.exit(2);
-  process.exit(1);
+  if (outcome.status === "committed" || outcome.status === "rejected" || outcome.status === "no_change") exit(0);
+  if (outcome.status === "stale_approval") exit(3);
+  if (outcome.status === "approval_required") exit(2);
+  exit(1);
 }
 
 async function runKnowledgeListCommand(rest: string[]): Promise<void> {
@@ -340,15 +372,15 @@ async function runKnowledgeListCommand(rest: string[]): Promise<void> {
   const bindingResult = await resolveActiveSpace(process.env);
   if (!bindingResult.ok) {
     printJson({ schema_version: 0, status: "invalid", errors: bindingResult.errors });
-    process.exit(1);
+    exit(1);
   }
   const result = await listKnowledgeRecords(bindingResult.value, parsed);
   if (!result.ok) {
     printJson({ schema_version: 0, status: "invalid", errors: result.errors });
-    process.exit(1);
+    exit(1);
   }
   printJson({ schema_version: 0, status: "ok", records: result.value });
-  process.exit(0);
+  exit(0);
 }
 
 async function runKnowledgeCommand(args: string[]): Promise<void> {
@@ -364,7 +396,7 @@ async function runKnowledgeCommand(args: string[]): Promise<void> {
   const bindingResult = await resolveActiveSpace(process.env);
   if (!bindingResult.ok) {
     printJson({ schema_version: 0, status: "invalid", errors: bindingResult.errors, refresh: REFRESH_NOT_ATTEMPTED });
-    process.exit(1);
+    exit(1);
   }
   const pack = await resolveCliPack(bindingResult.value);
   const candidateInput = await readCandidateFile(parsedArgs.candidatePath);
@@ -372,8 +404,8 @@ async function runKnowledgeCommand(args: string[]): Promise<void> {
   if (subcommand === "submit") {
     const result = submitKnowledgeCandidate({ binding: bindingResult.value, candidateInput, pack });
     printJson(result);
-    if (result.status === "submitted") process.exit(0);
-    process.exit(1);
+    if (result.status === "submitted") exit(0);
+    exit(1);
   }
 
   const proposalResult = await reconcileKnowledgeTransaction({
@@ -383,16 +415,16 @@ async function runKnowledgeCommand(args: string[]): Promise<void> {
   });
   if (subcommand === "reconcile") {
     printJson(proposalResult);
-    if (proposalResult.status === "proposal") process.exit(0);
-    process.exit(1);
+    if (proposalResult.status === "proposal") exit(0);
+    exit(1);
   }
   if (proposalResult.status !== "proposal") {
     printJson(proposalResult);
-    process.exit(1);
+    exit(1);
   }
   if (parsedArgs.expectHash === undefined) {
     printJson({ schema_version: 0, status: "invalid", errors: ["knowledge approval requires --expect <plan_hash> from a prior reconcile"] });
-    process.exit(1);
+    exit(1);
   }
   const applied = await applyKnowledgeProposal({
     binding: bindingResult.value,
@@ -450,9 +482,9 @@ async function readBulletsFile(bulletsPath: string): Promise<unknown> {
 }
 
 function rollupExit(outcome: KnowledgeRollupApplyOutcome): never {
-  if (outcome.status === "committed" || outcome.status === "no_change") process.exit(0);
-  if (outcome.status === "stale_approval") process.exit(3);
-  process.exit(1);
+  if (outcome.status === "committed" || outcome.status === "no_change") exit(0);
+  if (outcome.status === "stale_approval") exit(3);
+  exit(1);
 }
 
 async function runRollupCommand(args: string[]): Promise<void> {
@@ -476,7 +508,7 @@ async function runRollupCommand(args: string[]): Promise<void> {
   if (subcommand === "preview") {
     const result = await previewKnowledgeRollup({ binding: bindingResult.value, batchInput, pack });
     printJson(result);
-    process.exit(result.status === "preview" ? 0 : 1);
+    exit(result.status === "preview" ? 0 : 1);
   }
 
   const expectedRollupHash = requireDefined(parsedArgs.expectHash, "rollup approve expectHash validated above");
@@ -549,8 +581,8 @@ async function runRecallCommand(args: string[]): Promise<void> {
     pack,
   });
   printJson(result);
-  if (result.status === "failed") process.exit(1);
-  process.exit(0);
+  if (result.status === "failed") exit(1);
+  exit(0);
 }
 
 function parseRenderArgs(args: string[]): {
@@ -618,8 +650,8 @@ async function runRenderCommand(args: string[]): Promise<void> {
   const pack = await resolveCliPack(bindingResult.value);
   const result = await renderPresentation({ ...parsed, pack });
   printJson(result);
-  if (result.status === "failed") process.exit(1);
-  process.exit(0);
+  if (result.status === "failed") exit(1);
+  exit(0);
 }
 
 async function runCaptureFromTurnCommand(args: string[]): Promise<void> {
@@ -627,7 +659,7 @@ async function runCaptureFromTurnCommand(args: string[]): Promise<void> {
   const stdin = await readStdin();
   if (stdin.length === 0) {
     printJson({ schema_version: 0, status: "invalid", errors: ["expected TurnContext JSON on stdin"] });
-    process.exit(1);
+    exit(1);
   }
 
   let turnInput: unknown;
@@ -635,13 +667,13 @@ async function runCaptureFromTurnCommand(args: string[]): Promise<void> {
     turnInput = JSON.parse(stdin);
   } catch {
     printJson({ schema_version: 0, status: "invalid", errors: ["stdin must be valid JSON"] });
-    process.exit(1);
+    exit(1);
   }
 
   const bindingResult = await resolveActiveSpace(process.env);
   if (!bindingResult.ok) {
     printJson({ schema_version: 0, status: "invalid", errors: bindingResult.errors, refresh: REFRESH_NOT_ATTEMPTED });
-    process.exit(1);
+    exit(1);
   }
   const binding = bindingResult.value;
 
@@ -649,7 +681,7 @@ async function runCaptureFromTurnCommand(args: string[]): Promise<void> {
   const extractionPack = binding.packs.find((p) => p.extract === true);
   if (extractionPack === undefined) {
     printJson({ schema_version: 0, status: "invalid", errors: ["no extraction pack configured (no pack with extract: true)"] });
-    process.exit(1);
+    exit(1);
   }
 
   // Load the KnowledgeExtractor via the pack loader
@@ -660,7 +692,7 @@ async function runCaptureFromTurnCommand(args: string[]): Promise<void> {
       status: "invalid",
       errors: extractor.errors.map((error) => `${error.code}: ${error.message}`),
     });
-    process.exit(1);
+    exit(1);
   }
 
   // Build TurnContext from stdin
@@ -678,7 +710,7 @@ async function runCaptureFromTurnCommand(args: string[]): Promise<void> {
 
   if (candidates.length === 0) {
     printJson({ schema_version: 0, status: "no_candidates" });
-    process.exit(0);
+    exit(0);
   }
 
   // Submit each candidate through the knowledge transaction pipeline
@@ -706,7 +738,7 @@ async function runCaptureFromTurnCommand(args: string[]): Promise<void> {
 
   printJson({ schema_version: 0, status: "complete", results });
   const hasErrors = results.some((r) => r.status === "invalid");
-  process.exit(hasErrors ? 1 : 0);
+  exit(hasErrors ? 1 : 0);
 }
 
 async function runVersionCommand(): Promise<void> {
@@ -720,7 +752,7 @@ async function runVersionCommand(): Promise<void> {
       status: "invalid",
       errors: [{ code: "release_manifest_invalid", message: "installed release manifest is unavailable or invalid" }],
     });
-    process.exit(1);
+    exit(1);
   }
   printJson({
     schema_version: 0,
@@ -764,7 +796,7 @@ async function runArtifactReplaceCommand(rest: string[]): Promise<void> {
   const bindingResult = await resolveActiveSpace(process.env);
   if (!bindingResult.ok) {
     printJson({ schema_version: 0, status: "invalid", errors: bindingResult.errors });
-    process.exit(1);
+    exit(1);
   }
   let content: string;
   try {
@@ -775,7 +807,7 @@ async function runArtifactReplaceCommand(rest: string[]): Promise<void> {
       status: "invalid",
       errors: [`failed to read --input file: ${error instanceof Error ? error.message : String(error)}`],
     });
-    process.exit(1);
+    exit(1);
   }
   const result = await replaceArtifact(bindingResult.value, {
     root: parsed.root,
@@ -784,10 +816,10 @@ async function runArtifactReplaceCommand(rest: string[]): Promise<void> {
   });
   if (!result.ok) {
     printJson({ schema_version: 0, status: "invalid", errors: result.errors });
-    process.exit(1);
+    exit(1);
   }
   printJson({ schema_version: 0, status: result.value.status, path: result.value.path });
-  process.exit(0);
+  exit(0);
 }
 
 async function runArtifactCommand(args: string[]): Promise<void> {
@@ -837,13 +869,23 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "--help" || command === "-h" || command === "help") {
-    process.stdout.write(`${USAGE}\n`);
+    write(process.stdout, `${USAGE}\n`);
     return;
   }
   usageError(`unknown command: ${command ?? "(none)"}`);
 }
 
-main().catch((error: unknown) => {
-  process.stderr.write(`unexpected error: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-  process.exit(1);
-});
+async function run(): Promise<number> {
+  try {
+    await main();
+    return 0;
+  } catch (error) {
+    if (error instanceof CliExit) return error.code;
+    write(process.stderr, `unexpected error: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
+const code = await run();
+await Promise.all(pendingWrites);
+process.exit(code);

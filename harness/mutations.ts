@@ -1147,6 +1147,24 @@ export const mutations: Mutation[] = [
       "materializer failure retains the plan; retrying the same hash reruns only materialization",
     ],
   },
+  {
+    id: "cli-flushes-before-exit",
+    property:
+      "A CLI result written to a pipe arrives complete before the process exits: exiting with output still buffered delivers truncated JSON under exit status 0.",
+    file: "src/cli.ts",
+    find: "await Promise.all(pendingWrites);",
+    replace: "void pendingWrites;",
+    mustFail: ["a knowledge list result larger than 1 MB written to a pipe arrives complete"],
+  },
+  {
+    id: "damaged-cli-output-diagnosed",
+    property:
+      "A CLI result that exits 0 but whose stdout does not parse is reported as unparseable output with its byte count, not echoed as a command failure.",
+    file: "omp/omp-extension.ts",
+    find: "  if (outcome.exitCode === 0 && !parsesAsJson(outcome.stdout)) {",
+    replace: "  if (false && outcome.exitCode === 0 && !parsesAsJson(outcome.stdout)) {",
+    mustFail: ["a CLI result that exits 0 with damaged JSON is diagnosed as unparseable output"],
+  },
 ];
 
 /** Uppercase alias for callers that prefer registry-style constants. */

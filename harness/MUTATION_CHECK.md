@@ -2,9 +2,9 @@
 
 ## Status
 
-The registry pins one hundred two core properties across the harness runtime,
+The registry pins one hundred four core properties across the harness runtime,
 the standalone release manager, the mutation checker itself, and the omp
-extension — 102 properties in total, all listed below. The registry is
+extension — 104 properties in total, all listed below. The registry is
 core-only: every entry targets a file in `harness/`, `release/`, or the
 extension surface, and each entry carries a stable, unique, non-historical
 identifier.
@@ -236,6 +236,7 @@ entries by the source file they pin.
 | `cli-pack-config-parse-failure-reported` | The CLI reports every pack resolution failure from resolveKnowledgePack (pack_from_required, pack_load_failed, pack_export_invalid, pack_identity_mismatch) as a validation error and exits non-zero, never silently substituting a default pack. |
 | `cli-pack-resolved-from-space` | knowledge submit/reconcile/approve/reject resolve the pack only from the active space's declared id/version/from via resolveKnowledgePack; the CLI never hardcodes a pack identity. |
 | `cli-pack-unknown-fails-closed` | The CLI passes the declared `from` through to resolution and never fabricates one, so a required pack that omits from fails closed as pack_from_required rather than the CLI substituting any known pack. |
+| `cli-flushes-before-exit` | A CLI result written to a pipe arrives complete before the process exits: exiting with output still buffered delivers truncated JSON under exit status 0. |
 
 ## src/packLoader.ts
 | `loader-pack-external-from-resolved` | resolveKnowledgePack enforces that the loaded module's declared id and version exactly match the binding's declared id and version, refusing a mismatch as pack_identity_mismatch rather than returning a pack of a different identity. |
@@ -263,6 +264,7 @@ entries by the source file they pin.
 | `extension-stale-apply-gate-disabled` | When the CLI reports stale_approval for a previewed plan, engram_capture_apply returns status "stale" and deletes the pending entry, forcing a fresh preview and fresh approval instead of treating a refused approval as committed. |
 | `committed-plan-retry-reapproves-records` | A second engram_capture_apply carrying the same committed hash reruns ONLY pack materialization; re-entering the CLI approve path on retry resubmits already-committed records and surfaces stale_approval after any post-commit record change. |
 | `omp-extension-registers-capture-preview-tool` | Disabling the `engram_capture_preview` registration in omp-extension.ts leaves explicit capture without its preview tool; the check test "preview returns mutation summary without exposing the candidate; apply commits the same hash" fails because `callJsonTool` asserts the tool was registered. |
+| `damaged-cli-output-diagnosed` | A CLI result that exits 0 but whose stdout does not parse is reported as unparseable output with its byte count, not echoed as a command failure. |
 
 ## Notes on individual entries
 

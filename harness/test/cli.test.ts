@@ -61,6 +61,9 @@ async function runCli(
         ENGRAM_BINDING_REGISTRY: registryPath,
         ENGRAM_HOST_SESSION_ID: hostSessionId,
       },
+      // Above the default 1 MiB so a large result is judged by the CLI's
+      // output, not by this reader's cap.
+      maxBuffer: 64 * 1024 * 1024,
     });
     return { code: 0, stdout, stderr };
   } catch (error) {
@@ -555,6 +558,33 @@ test("CLI: knowledge list filters seeded records by pack and status and prints o
   assert.equal(parsed.schema_version, 0);
   assert.equal(parsed.status, "ok");
   assert.deepEqual(parsed.records.map((record) => record.id), ["active-a", "active-b"]);
+});
+
+test("CLI: a knowledge list result larger than 1 MB written to a pipe arrives complete and parses as JSON", async () => {
+  // The CLI once exited right after writing, and a pipe dropped everything
+  // not yet flushed (~700 KB survived): exit 0 with truncated JSON, which the
+  // host reads as a failed list and every materialization then fails.
+  const spaceId = "cli-knowledge-list-large";
+  const sessionId = "cli-knowledge-list-large-session";
+  const { space, registryPath } = await prepareEmptyRecordsSpace(spaceId, sessionId);
+
+  const recordCount = 60;
+  const ids = Array.from({ length: recordCount }, (_, index) => `bulk-${String(index).padStart(3, "0")}`);
+  for (const id of ids) {
+    const record = listingRecord(id, "cli-list-pack", "active", spaceId);
+    await writeFile(
+      join(space.binding.recordsRoot, `${id}.md`),
+      serializeKnowledgeRecord({ ...record, statement: `${record.statement} ${"padding ".repeat(4_000)}`.trim() }),
+      "utf8",
+    );
+  }
+
+  const result = await runCli(["knowledge", "list", "--pack", "cli-list-pack", "--status", "active"], registryPath, sessionId);
+  assert.equal(result.code, 0, `stderr: ${result.stderr}`);
+  assert.ok(result.stdout.length > 1_000_000, `fixture must produce more than 1 MB of output, got ${result.stdout.length} bytes`);
+  const parsed = JSON.parse(result.stdout) as { status: string; records: KnowledgeRecord[] };
+  assert.equal(parsed.status, "ok");
+  assert.deepEqual(parsed.records.map((record) => record.id), ids);
 });
 
 test("CLI: knowledge list surfaces a guarded confinement error as structured JSON and exits nonzero", async () => {

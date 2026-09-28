@@ -497,6 +497,32 @@ test("materializer failure retains the plan; retrying the same hash reruns only 
   }
 });
 
+test("a CLI result that exits 0 with damaged JSON is diagnosed as unparseable output, not echoed as a command failure", async () => {
+  const harness = await startHarness("omp-cap-truncated", "omp-cap-truncated-session");
+  try {
+    await seedRecord(harness);
+    // Stand-in for pipe truncation: the CLI exits 0 but only a prefix of its
+    // JSON reaches the adapter.
+    const truncatedBytes = 200;
+    await writeFile(
+      join(harness.space.root, "engram-cli-wrapper"),
+      `#!/bin/sh\nout=$(mktemp)\n${process.execPath} ${CLI_PATH} "$@" > "$out"\nhead -c ${truncatedBytes} "$out"\nrm -f "$out"\n`,
+      { mode: 0o755 },
+    );
+
+    const preview = await previewPlan(harness, "truncated note");
+    assert.equal(preview.status, "blocked", `expected a blocked preview, got ${JSON.stringify(preview)}`);
+    const message = String(preview.errors?.[0]?.message);
+    assert.ok(
+      message.includes(`not parseable as JSON (${truncatedBytes} bytes)`),
+      `expected an unparseable-output diagnosis, got: ${message}`,
+    );
+    assert.equal(message.includes('"schema_version"'), false, `the damaged prefix must not be echoed: ${message}`);
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
 test("unknown and session-mismatched plan hashes are rejected without invoking the CLI", async () => {
   const harness = await startHarness("omp-cap-unknown", "omp-cap-unknown-session");
   try {

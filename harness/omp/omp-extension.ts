@@ -482,6 +482,30 @@ function parseListedRecords(stdout: string): KnowledgeRecord[] | undefined {
   return records;
 }
 
+type CliOutcome = { exitCode: number; stdout: string; stderr: string };
+
+function parsesAsJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Describes a CLI result the adapter could not use. Exit 0 with stdout that
+ * does not parse means the output itself was damaged (e.g. truncated), not
+ * that the command refused: echoing its valid-looking prefix as a command
+ * failure points away from the real problem.
+ */
+function cliFailureMessage(command: string, outcome: CliOutcome): string {
+  if (outcome.exitCode === 0 && !parsesAsJson(outcome.stdout)) {
+    return `engram ${command} exited 0 but its stdout is not parseable as JSON (${Buffer.byteLength(outcome.stdout)} bytes)`;
+  }
+  return `engram ${command} failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`;
+}
+
 /** Mechanical mutation summary: no domain interpretation beyond field reads. */
 function summarizeMutations(mutations: CaptureMutationView[]): {
   created: string[];
@@ -947,22 +971,21 @@ export default async function engramExtension(
     };
   }
 
-  async function runCli(
-    args: string[],
-    signal?: AbortSignal,
-  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  async function runCli(args: string[], signal?: AbortSignal): Promise<CliOutcome> {
     const proc = Bun.spawn([cliPath, ...args], {
       stdout: "pipe",
       stderr: "pipe",
       env: cliEnv(),
       ...(signal === undefined ? {} : { signal }),
     });
-    const exitCode = await proc.exited;
-    return {
-      exitCode,
-      stdout: await new Response(proc.stdout).text(),
-      stderr: await new Response(proc.stderr).text(),
-    };
+    // Drain both pipes while waiting for exit: a child that flushes its output
+    // before exiting must never wait on a reader that waits on its exit.
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr };
   }
 
   /**
@@ -1000,7 +1023,7 @@ export default async function engramExtension(
         errors: errors ?? [{
           kind: "transaction",
           code: "reconcile_failed",
-          message: `engram knowledge reconcile failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
+          message: cliFailureMessage("knowledge reconcile", outcome),
         }],
       };
     });
@@ -1019,9 +1042,7 @@ export default async function engramExtension(
         const outcome = await runCli(["knowledge", "list", "--pack", extractionPackId, "--status", "active"]);
         const records = parseListedRecords(outcome.stdout);
         if (outcome.exitCode !== 0 || records === undefined) {
-          throw new Error(
-            `engram knowledge list failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
-          );
+          throw new Error(cliFailureMessage("knowledge list", outcome));
         }
         return records;
       },
@@ -1039,9 +1060,7 @@ export default async function engramExtension(
           ]);
           const mapped = parseArtifactReplacement(outcome.stdout);
           if (outcome.exitCode !== 0 || mapped === undefined) {
-            throw new Error(
-              `engram artifact replace failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
-            );
+            throw new Error(cliFailureMessage("artifact replace", outcome));
           }
           return mapped;
         }),
@@ -1291,9 +1310,7 @@ a second apply with the same hash retries only view regeneration.`,
             return toolText({
               plan_hash: planHash,
               status: "error",
-              errors: [
-                `engram knowledge approve failed (exit ${outcome.exitCode}): ${(outcome.stdout || outcome.stderr).slice(0, 500)}`,
-              ],
+              errors: [cliFailureMessage("knowledge approve", outcome)],
             });
           }
           entry.appliedPlan = { planHash, mutations: parsed.mutations };
