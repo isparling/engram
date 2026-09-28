@@ -102,6 +102,6 @@ test("property: OMP package ships only the adapter and declares its runtime CLI 
   const manifest = await readPackageJson(omp);
   assert.equal(manifest.name, "@isparling/engram-omp");
   assert.equal(requireExport(manifest, ".").import, "./omp-extension.ts");
-  assert.deepEqual(manifest.dependencies, { "@isparling/engram-cli": "^0.2.0" });
+  assert.deepEqual(manifest.dependencies, { "@isparling/engram-cli": "^0.2.1" });
   assert.deepEqual(await packPaths(omp), ["LICENSE", "README.md", "omp-extension.ts", "package.json"]);
 });

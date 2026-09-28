@@ -1,6 +1,6 @@
 {
   "name": "@isparling/engram-omp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": false,
   "type": "module",
   "license": "Apache-2.0",
@@ -12,7 +12,7 @@
   "pi": { "extensions": ["./omp-extension.ts"] },
   "files": ["omp-extension.ts", "README.md"],
   "dependencies": {
-    "@isparling/engram-cli": "^0.2.0"
+    "@isparling/engram-cli": "^0.2.1"
   },
   "peerDependencies": {
     "@isparling/engram-harness": "^0.2.0"
